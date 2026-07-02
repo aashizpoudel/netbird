@@ -120,7 +120,7 @@ func (d *BindListener) ReadPackets() {
 
 	d.peerCfg.Log.Debugf("removing lazy endpoint for peer %s", d.peerCfg.PublicKey)
 	_ = d.lazyConn.Close()
-	d.bind.RemoveEndpoint(d.fakeIP)
+	d.bind.RemoveEndpoint(d.fakeIP, d.lazyConn)
 	d.done.Done()
 }
 

@@ -108,11 +108,20 @@ func (b *RelayBindJS) SetEndpoint(fakeIP netip.Addr, conn net.Conn) {
 	b.endpointsMu.Unlock()
 }
 
-func (s *RelayBindJS) RemoveEndpoint(fakeIP netip.Addr) {
+func (s *RelayBindJS) RemoveEndpoint(fakeIP netip.Addr, conn net.Conn) {
 	s.endpointsMu.Lock()
 	defer s.endpointsMu.Unlock()
 
-	delete(s.endpoints, fakeIP)
+	if conn == nil {
+		// Defensive: delete unconditionally if no connection provided
+		delete(s.endpoints, fakeIP)
+		return
+	}
+
+	// Delete only if the stored connection matches the one being removed
+	if s.endpoints[fakeIP] == conn {
+		delete(s.endpoints, fakeIP)
+	}
 }
 
 // GetICEMux returns the ICE UDPMux that was created and used by ICEBind

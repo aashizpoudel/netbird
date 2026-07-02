@@ -228,3 +228,51 @@ func nodePublicFromWGKey(k wgtypes.Key) tskey.NodePublic {
 	raw := [32]byte(k)
 	return tskey.NodePublicFromRaw32(mem.B(raw[:]))
 }
+
+func TestBufferedPacketFlushedOnRegister(t *testing.T) {
+	_, localPub := mustWGKeyPair(t)
+	_, remotePub := mustWGKeyPair(t)
+
+	home := newFakeDERPClient(nodePublicFromWGKey(localPub))
+	remote := newFakeDERPClient(nodePublicFromWGKey(remotePub))
+	tr := newTailscaleTransportForTest(func(node Node) (tailscaleDERPClient, error) {
+		switch node.ID {
+		case "home":
+			return home, nil
+		case "remote":
+			return remote, nil
+		default:
+			return nil, errors.New("unexpected node")
+		}
+	})
+
+	ctx := context.Background()
+	require.NoError(t, tr.ConnectHome(ctx, Node{ID: "home", URL: "https://home.example/derp", RegionID: 1}))
+
+	// Dispatch a packet for the remote peer before any packetConn is registered
+	home.recv(tsderp.ReceivedPacket{
+		Source: nodePublicFromWGKey(remotePub),
+		Data:   []byte("buffered-packet"),
+	})
+
+	// Give the receive loop time to dispatch the packet
+	time.Sleep(time.Millisecond * 10)
+
+	// Now open a stream for that remote peer
+	conn, err := tr.OpenPeerStream(ctx, remotePub.String(), PeerState{
+		Enabled:      true,
+		HomeRegionID: 2,
+		HomeNodeID:   "remote",
+	}, Node{ID: "remote", URL: "https://remote.example/derp", RegionID: 2})
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Set a read deadline to avoid hanging indefinitely
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+
+	// The buffered packet should be flushed to the new connection
+	buf := make([]byte, 32)
+	n, err := conn.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "buffered-packet", string(buf[:n]))
+}

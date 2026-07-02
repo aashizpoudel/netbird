@@ -32,7 +32,7 @@ func (m *mockEndpointManager) SetEndpoint(fakeIP netip.Addr, conn net.Conn) {
 	m.endpoints[fakeIP] = conn
 }
 
-func (m *mockEndpointManager) RemoveEndpoint(fakeIP netip.Addr) {
+func (m *mockEndpointManager) RemoveEndpoint(fakeIP netip.Addr, conn net.Conn) {
 	delete(m.endpoints, fakeIP)
 }
 

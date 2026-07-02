@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
 	"sync"
 
@@ -21,6 +22,14 @@ import (
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
 	nbnet "github.com/netbirdio/netbird/client/net"
 )
+
+var derpTraceEnabled = os.Getenv("NB_DERP_TRACE") != ""
+
+func derpTracef(format string, args ...any) {
+	if derpTraceEnabled {
+		log.Debugf("derp[trace]: "+format, args...)
+	}
+}
 
 type receiverCreator struct {
 	iceBind *ICEBind
@@ -68,7 +77,7 @@ func NewICEBind(transportNet transport.Net, address wgaddr.Address, mtu uint16) 
 		address:          address,
 		mtu:              mtu,
 		endpoints:        make(map[netip.Addr]net.Conn),
-		recvChan:         make(chan recvMessage, 1),
+		recvChan:         make(chan recvMessage, 256), // Capacity 1 could stall proxyToLocal under load
 		closedChan:       make(chan struct{}),
 		closed:           true,
 		activityRecorder: NewActivityRecorder(),
@@ -132,23 +141,34 @@ func (b *ICEBind) SetEndpoint(fakeIP netip.Addr, conn net.Conn) {
 	b.endpointsMu.Unlock()
 }
 
-func (b *ICEBind) RemoveEndpoint(fakeIP netip.Addr) {
+func (b *ICEBind) RemoveEndpoint(fakeIP netip.Addr, conn net.Conn) {
 	b.endpointsMu.Lock()
 	defer b.endpointsMu.Unlock()
 
-	delete(b.endpoints, fakeIP)
+	if conn == nil {
+		// Defensive: delete unconditionally if no connection provided
+		delete(b.endpoints, fakeIP)
+		return
+	}
+
+	// Delete only if the stored connection matches the one being removed
+	if b.endpoints[fakeIP] == conn {
+		delete(b.endpoints, fakeIP)
+	} else {
+		log.Debugf("skip endpoint removal for %s: registered to a newer conn", fakeIP)
+	}
 }
 
 func (b *ICEBind) ReceiveFromEndpoint(ctx context.Context, ep *Endpoint, buf []byte) {
 	select {
 	case <-b.closedChan:
-		log.Warnf("derp[trace]: ReceiveFromEndpoint DROP (bind closed) len=%d", len(buf))
+		derpTracef("ReceiveFromEndpoint DROP (bind closed) len=%d", len(buf))
 		return
 	case <-ctx.Done():
-		log.Warnf("derp[trace]: ReceiveFromEndpoint DROP (ctx done) len=%d", len(buf))
+		derpTracef("ReceiveFromEndpoint DROP (ctx done) len=%d", len(buf))
 		return
 	case b.recvChan <- recvMessage{ep, buf}:
-		log.Debugf("derp[trace]: ReceiveFromEndpoint -> recvChan len=%d", len(buf))
+		derpTracef("ReceiveFromEndpoint -> recvChan len=%d", len(buf))
 	}
 }
 
@@ -157,9 +177,20 @@ func (b *ICEBind) Send(bufs [][]byte, ep wgConn.Endpoint) error {
 	conn, ok := b.endpoints[ep.DstIP()]
 	b.endpointsMu.Unlock()
 	if !ok {
+		// If endpoint not found and destination is a fake relay address (127.1.x.x),
+		// drop the packet instead of falling through to StdNetBind.
+		ip := ep.DstIP().Unmap()
+		if ip.Is4() {
+			a := ip.As4()
+			if a[0] == 127 && a[1] == 1 {
+				log.Warnf("bind: no endpoint registered for fake address %s, dropping %d packet(s)", ep.DstIP(), len(bufs))
+				return nil
+			}
+		}
 		return b.StdNetBind.Send(bufs, ep)
 	}
 
+	derpTracef("Send %d buf(s) via registered endpoint %s", len(bufs), ep.DstIP())
 	for _, buf := range bufs {
 		if _, err := conn.Write(buf); err != nil {
 			return err

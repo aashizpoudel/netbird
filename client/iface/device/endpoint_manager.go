@@ -9,5 +9,5 @@ import (
 // Implemented by bind.ICEBind and bind.RelayBindJS.
 type EndpointManager interface {
 	SetEndpoint(fakeIP netip.Addr, conn net.Conn)
-	RemoveEndpoint(fakeIP netip.Addr)
+	RemoveEndpoint(fakeIP netip.Addr, conn net.Conn)
 }

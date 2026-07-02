@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 
 	"sync"
 
@@ -16,9 +17,17 @@ import (
 	"github.com/netbirdio/netbird/client/iface/wgproxy/listener"
 )
 
+var derpTraceEnabled = os.Getenv("NB_DERP_TRACE") != ""
+
+func derpTracef(format string, args ...any) {
+	if derpTraceEnabled {
+		log.Debugf("derp[trace]: "+format, args...)
+	}
+}
+
 type Bind interface {
 	SetEndpoint(addr netip.Addr, conn net.Conn)
-	RemoveEndpoint(addr netip.Addr)
+	RemoveEndpoint(addr netip.Addr, conn net.Conn)
 	ReceiveFromEndpoint(ctx context.Context, ep *bind.Endpoint, buf []byte)
 }
 
@@ -164,7 +173,7 @@ func (p *ProxyBind) close() error {
 	p.pausedCond.Signal()
 	p.pausedCond.L.Unlock()
 
-	p.bind.RemoveEndpoint(p.wgRelayedEndpoint.Addr())
+	p.bind.RemoveEndpoint(p.wgRelayedEndpoint.Addr(), p.remoteConn)
 
 	if rErr := p.remoteConn.Close(); rErr != nil && !errors.Is(rErr, net.ErrClosed) {
 		return rErr
@@ -184,7 +193,7 @@ func (p *ProxyBind) proxyToLocal(ctx context.Context) {
 		n, err := p.remoteConn.Read(buf)
 		if err != nil {
 			if ctx.Err() != nil {
-				log.Debugf("derp[trace]: proxyToLocal read err (ctx done): %v", err)
+				derpTracef("proxyToLocal read err (ctx done): %v", err)
 				return
 			}
 			p.closeListener.Notify()
@@ -192,14 +201,14 @@ func (p *ProxyBind) proxyToLocal(ctx context.Context) {
 			return
 		}
 
-		log.Debugf("derp[trace]: proxyToLocal read %d bytes from %s", n, p.remoteConn.RemoteAddr())
+		derpTracef("proxyToLocal read %d bytes from %s", n, p.remoteConn.RemoteAddr())
 
 		p.pausedCond.L.Lock()
 		for p.paused {
 			p.pausedCond.Wait()
 		}
 
-		log.Debugf("derp[trace]: proxyToLocal -> ReceiveFromEndpoint %d bytes (paused=%v)", n, p.paused)
+		derpTracef("proxyToLocal -> ReceiveFromEndpoint %d bytes (paused=%v)", n, p.paused)
 		p.bind.ReceiveFromEndpoint(ctx, p.wgCurrentUsed, buf[:n])
 		p.pausedCond.L.Unlock()
 	}

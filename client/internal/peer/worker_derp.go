@@ -44,9 +44,11 @@ type WorkerDERP struct {
 	manager DERPManager
 	onReady func(DERPConnInfo)
 
-	derpConn net.Conn
-	derpLock sync.Mutex
-
+	derpConn         net.Conn
+	lastRemoteState  DERPPeerState
+	pendingOffer     *OfferAnswer
+	derpLock         sync.Mutex
+	setupInProgress  atomic.Bool
 	derpSupportedOnRemotePeer atomic.Bool
 }
 
@@ -64,6 +66,13 @@ func NewWorkerDERP(ctx context.Context, log *log.Entry, config ConnConfig, conn 
 	return w
 }
 
+// sameDERPHome reports whether the remote peer still advertises the same DERP
+// home. Generation is intentionally ignored: a remote client restart with an
+// unchanged home does not invalidate the existing stream.
+func sameDERPHome(a, b DERPPeerState) bool {
+	return a.HomeRegionID == b.HomeRegionID && a.HomeNodeID == b.HomeNodeID
+}
+
 func (w *WorkerDERP) OnNewOffer(remoteOfferAnswer *OfferAnswer) {
 	if !w.isDERPSupported(remoteOfferAnswer) {
 		w.log.Debugf("DERP is not supported by remote peer or local manager")
@@ -71,6 +80,27 @@ func (w *WorkerDERP) OnNewOffer(remoteOfferAnswer *OfferAnswer) {
 		return
 	}
 	w.derpSupportedOnRemotePeer.Store(true)
+
+	w.derpLock.Lock()
+	existing := w.derpConn
+	last := w.lastRemoteState
+	w.derpLock.Unlock()
+
+	if existing != nil && sameDERPHome(last, remoteOfferAnswer.DERPState) {
+		if oc, ok := existing.(interface{ IsClosed() bool }); !ok || !oc.IsClosed() {
+			w.log.Debugf("handled offer by reusing existing DERP connection")
+			return
+		}
+	}
+
+	if !w.setupInProgress.CompareAndSwap(false, true) {
+		w.derpLock.Lock()
+		w.pendingOffer = remoteOfferAnswer
+		w.derpLock.Unlock()
+		w.log.Debugf("DERP setup in progress, queued latest offer")
+		return
+	}
+	defer w.finishSetup()
 
 	derpConn, err := w.manager.OpenPeerConn(w.peerCtx, w.config.Key, remoteOfferAnswer.DERPState)
 	if err != nil {
@@ -80,7 +110,12 @@ func (w *WorkerDERP) OnNewOffer(remoteOfferAnswer *OfferAnswer) {
 
 	w.derpLock.Lock()
 	w.derpConn = derpConn
+	w.lastRemoteState = remoteOfferAnswer.DERPState
 	w.derpLock.Unlock()
+
+	// The superseded connection, if any, is intentionally left open here: it is
+	// still wired to the old wgProxy's disconnect listener, and closing it would
+	// tear down the new connection. conn.setDERPProxy closes it safely later.
 
 	w.log.Debugf("peer conn opened via DERP")
 	if w.onReady == nil {
@@ -92,6 +127,23 @@ func (w *WorkerDERP) OnNewOffer(remoteOfferAnswer *OfferAnswer) {
 		rosenpassPubKey: remoteOfferAnswer.RosenpassPubKey,
 		rosenpassAddr:   remoteOfferAnswer.RosenpassAddr,
 	})
+}
+
+// finishSetup marks the current setup attempt as done and, if a newer offer
+// arrived while it was running, re-enters OnNewOffer with that offer. It must
+// run after setupInProgress is cleared and must not hold derpLock while
+// calling OnNewOffer to avoid deadlocking on re-entry.
+func (w *WorkerDERP) finishSetup() {
+	w.setupInProgress.Store(false)
+
+	w.derpLock.Lock()
+	pending := w.pendingOffer
+	w.pendingOffer = nil
+	w.derpLock.Unlock()
+
+	if pending != nil {
+		w.OnNewOffer(pending)
+	}
 }
 
 func (w *WorkerDERP) LocalState() (DERPPeerState, bool) {
@@ -116,6 +168,9 @@ func (w *WorkerDERP) DERPIsSupportedLocally() bool {
 func (w *WorkerDERP) CloseConn() {
 	w.derpLock.Lock()
 	defer w.derpLock.Unlock()
+
+	w.pendingOffer = nil
+
 	if w.derpConn == nil {
 		return
 	}
@@ -123,6 +178,9 @@ func (w *WorkerDERP) CloseConn() {
 	if err := w.derpConn.Close(); err != nil {
 		w.log.Warnf("failed to close DERP connection: %v", err)
 	}
+
+	w.derpConn = nil
+	w.lastRemoteState = DERPPeerState{}
 }
 
 func (w *WorkerDERP) isDERPSupported(answer *OfferAnswer) bool {

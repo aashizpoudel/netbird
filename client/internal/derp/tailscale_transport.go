@@ -21,6 +21,25 @@ import (
 
 const packetConnBuffer = 128
 
+var derpTraceEnabled = os.Getenv("NB_DERP_TRACE") != ""
+
+func derpTracef(format string, args ...any) {
+	if derpTraceEnabled {
+		logrus.Debugf("derp[trace]: "+format, args...)
+	}
+}
+
+type pendingPacket struct {
+	data []byte
+	at   time.Time
+}
+
+const (
+	pendingPacketsPerPeer = 32
+	pendingPacketMaxAge   = 10 * time.Second
+	pendingPeersMax       = 64
+)
+
 type tailscaleDERPClient interface {
 	Connect(context.Context) error
 	Close() error
@@ -45,6 +64,7 @@ type TailscaleTransport struct {
 
 	clients map[string]*derpClientEntry
 	conns   map[string]map[*packetConn]struct{}
+	pending map[string][]pendingPacket
 	closed  bool
 }
 
@@ -69,6 +89,7 @@ func NewTailscaleTransport(wgPrivateKey wgtypes.Key) (*TailscaleTransport, error
 		privateKey: privateKey,
 		clients:    make(map[string]*derpClientEntry),
 		conns:      make(map[string]map[*packetConn]struct{}),
+		pending:    make(map[string][]pendingPacket),
 	}
 	netMon := netmon.NewStatic()
 	tr.factory = func(node Node) (tailscaleDERPClient, error) {
@@ -89,6 +110,7 @@ func newTailscaleTransportForTest(factory tailscaleDERPClientFactory) *Tailscale
 		factory: factory,
 		clients: make(map[string]*derpClientEntry),
 		conns:   make(map[string]map[*packetConn]struct{}),
+		pending: make(map[string][]pendingPacket),
 	}
 }
 
@@ -123,6 +145,7 @@ func (t *TailscaleTransport) CloseHome() error {
 	t.clients = make(map[string]*derpClientEntry)
 	conns := t.allConnsLocked()
 	t.conns = make(map[string]map[*packetConn]struct{})
+	t.pending = make(map[string][]pendingPacket)
 	t.mu.Unlock()
 
 	for _, conn := range conns {
@@ -156,7 +179,7 @@ func (t *TailscaleTransport) OpenPeerStream(ctx context.Context, remoteKey strin
 
 	conn := newPacketConn(t, entry, remotePub)
 	t.registerConn(remotePub, conn)
-	logrus.Debugf("derp[trace]: OpenPeerStream for %s created conn %p", remotePub.ShortString(), conn)
+	derpTracef("OpenPeerStream for %s created conn %p", remotePub.ShortString(), conn)
 	return conn, nil
 }
 
@@ -243,14 +266,14 @@ func (t *TailscaleTransport) recvLoop(entry *derpClientEntry, clientKey string) 
 			if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
 				logrus.Debugf("derp: receive loop for node %q stopped: %v", entry.node.ID, err)
 			}
-			logrus.Debugf("derp[trace]: recvLoop for node %q exiting", entry.node.ID)
+			derpTracef("recvLoop for node %q exiting", entry.node.ID)
 			return
 		}
 
 		switch m := msg.(type) {
 		case tsderp.ReceivedPacket:
 			data := append([]byte(nil), m.Data...)
-			logrus.Debugf("derp[trace]: recvLoop got ReceivedPacket from %s len=%d", m.Source.ShortString(), len(data))
+			derpTracef("recvLoop got ReceivedPacket from %s len=%d", m.Source.ShortString(), len(data))
 			t.dispatchPacket(m.Source, data)
 		case tsderp.PingMessage:
 			if err := entry.client.SendPong([8]byte(m)); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -269,13 +292,53 @@ func (t *TailscaleTransport) dispatchPacket(source tskey.NodePublic, data []byte
 	for conn := range t.conns[key] {
 		conns = append(conns, conn)
 	}
-	t.mu.Unlock()
 
 	if len(conns) == 0 {
-		logrus.Warnf("derp[trace]: dispatchPacket from %s len=%d DROP (no registered packetConn)", source.ShortString(), len(data))
+		// No conns for this key; buffer the packet for later delivery
+		// First, drop any stale pending entries
+		queued := t.pending[key]
+		if queued != nil {
+			var valid []pendingPacket
+			now := time.Now()
+			for _, p := range queued {
+				if now.Sub(p.at) <= pendingPacketMaxAge {
+					valid = append(valid, p)
+				}
+			}
+			if len(valid) > 0 {
+				t.pending[key] = valid
+			} else {
+				delete(t.pending, key)
+			}
+		}
+
+		// Check if we can add a new pending entry
+		if _, keyExists := t.pending[key]; !keyExists && len(t.pending) >= pendingPeersMax {
+			t.mu.Unlock()
+			logrus.Warnf("derp[trace]: dispatchPacket from %s len=%d DROP (pending peers full)", source.ShortString(), len(data))
+			return
+		}
+
+		// Append the packet to pending
+		dataCopy := append([]byte(nil), data...)
+		newPacket := pendingPacket{data: dataCopy, at: time.Now()}
+		t.pending[key] = append(t.pending[key], newPacket)
+		queued = t.pending[key]
+
+		// If we exceed capacity, drop oldest entries
+		if len(queued) > pendingPacketsPerPeer {
+			dropped := len(queued) - pendingPacketsPerPeer
+			t.pending[key] = queued[dropped:]
+			logrus.Warnf("derp[trace]: dispatchPacket from %s len=%d DROP %d oldest (pending cap exceeded)", source.ShortString(), len(data), dropped)
+		} else {
+			derpTracef("dispatchPacket from %s len=%d buffered (pending count=%d)", source.ShortString(), len(data), len(t.pending[key]))
+		}
+		t.mu.Unlock()
 		return
 	}
-	logrus.Debugf("derp[trace]: dispatchPacket from %s len=%d -> %d conn(s)", source.ShortString(), len(data), len(conns))
+
+	t.mu.Unlock()
+	derpTracef("dispatchPacket from %s len=%d -> %d conn(s)", source.ShortString(), len(data), len(conns))
 	for _, conn := range conns {
 		conn.deliver(data)
 	}
@@ -283,14 +346,32 @@ func (t *TailscaleTransport) dispatchPacket(source tskey.NodePublic, data []byte
 
 func (t *TailscaleTransport) registerConn(remote tskey.NodePublic, conn *packetConn) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	key := nodePublicMapKey(remote)
 	if t.conns[key] == nil {
 		t.conns[key] = make(map[*packetConn]struct{})
 	}
 	n := len(t.conns[key])
 	t.conns[key][conn] = struct{}{}
-	logrus.Debugf("derp[trace]: registerConn %s conn %p (now %d conn(s) for peer)", remote.ShortString(), conn, n+1)
+	queued := t.pending[key]
+	delete(t.pending, key)
+	t.mu.Unlock()
+
+	derpTracef("registerConn %s conn %p (now %d conn(s) for peer)", remote.ShortString(), conn, n+1)
+
+	// Flush buffered packets to the new connection
+	if len(queued) > 0 {
+		flushed := 0
+		now := time.Now()
+		for _, p := range queued {
+			if now.Sub(p.at) <= pendingPacketMaxAge {
+				conn.deliver(p.data)
+				flushed++
+			}
+		}
+		if flushed > 0 {
+			logrus.Debugf("derp: flushed %d buffered packet(s) to new conn for %s", flushed, remote.ShortString())
+		}
+	}
 }
 
 func (t *TailscaleTransport) unregisterConn(remote tskey.NodePublic, conn *packetConn) {
@@ -302,7 +383,7 @@ func (t *TailscaleTransport) unregisterConn(remote tskey.NodePublic, conn *packe
 	if remaining == 0 {
 		delete(t.conns, key)
 	}
-	logrus.Debugf("derp[trace]: unregisterConn %s conn %p (now %d conn(s) for peer)", remote.ShortString(), conn, remaining)
+	derpTracef("unregisterConn %s conn %p (now %d conn(s) for peer)", remote.ShortString(), conn, remaining)
 }
 
 func (t *TailscaleTransport) allConnsLocked() []*packetConn {
@@ -391,6 +472,7 @@ func (c *packetConn) Write(b []byte) (int, error) {
 		}
 		return 0, err
 	}
+	derpTracef("packetConn.Write to %s len=%d OK", c.remote.ShortString(), len(b))
 	return len(b), nil
 }
 
@@ -458,9 +540,9 @@ func (c *packetConn) SetWriteDeadline(t time.Time) error {
 func (c *packetConn) deliver(data []byte) {
 	select {
 	case <-c.closeCh:
-		logrus.Debugf("derp[trace]: deliver to %s DROP (closed)", c.remote.ShortString())
+		derpTracef("deliver to %s DROP (closed)", c.remote.ShortString())
 	case c.inbox <- data:
-		logrus.Debugf("derp[trace]: deliver to %s len=%d OK (inbox len=%d)", c.remote.ShortString(), len(data), len(c.inbox))
+		derpTracef("deliver to %s len=%d OK (inbox len=%d)", c.remote.ShortString(), len(data), len(c.inbox))
 	default:
 		logrus.Warnf("derp[trace]: deliver to %s DROP (inbox full)", c.remote.ShortString())
 	}
@@ -473,6 +555,10 @@ func (c *packetConn) isClosed() bool {
 	default:
 		return false
 	}
+}
+
+func (c *packetConn) IsClosed() bool {
+	return c.isClosed()
 }
 
 func (c *packetConn) deadlineExceeded(read bool) bool {
