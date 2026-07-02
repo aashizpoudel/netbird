@@ -142,10 +142,13 @@ func (b *ICEBind) RemoveEndpoint(fakeIP netip.Addr) {
 func (b *ICEBind) ReceiveFromEndpoint(ctx context.Context, ep *Endpoint, buf []byte) {
 	select {
 	case <-b.closedChan:
+		log.Warnf("derp[trace]: ReceiveFromEndpoint DROP (bind closed) len=%d", len(buf))
 		return
 	case <-ctx.Done():
+		log.Warnf("derp[trace]: ReceiveFromEndpoint DROP (ctx done) len=%d", len(buf))
 		return
 	case b.recvChan <- recvMessage{ep, buf}:
+		log.Debugf("derp[trace]: ReceiveFromEndpoint -> recvChan len=%d", len(buf))
 	}
 }
 

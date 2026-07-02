@@ -52,6 +52,16 @@ type ClientManager struct {
 	// after UpdateMap keep working.
 	homeConnected bool
 
+	// onHomeStateChange is invoked (without holding m.mu) when the effective
+	// home connection state transitions, so callers such as the engine can
+	// refresh cached status. nil means no notification. See
+	// notifyHomeStateChange.
+	onHomeStateChange func()
+
+	// homeNotified is the last home-connected state delivered to
+	// onHomeStateChange, used to suppress redundant notifications.
+	homeNotified bool
+
 	// loopCtx/loopCancel drive the home-connection goroutine; loopDone is
 	// closed when the loop exits so Close can wait for a clean shutdown.
 	loopCtx    context.Context
@@ -232,6 +242,7 @@ func (m *ClientManager) runHomeLoop(ctx context.Context, transport Transport, do
 			m.mu.Lock()
 			m.homeConnected = false
 			m.mu.Unlock()
+			m.notifyHomeStateChange()
 			// No home selected yet; wait for UpdateMap to provide one.
 			if !sleepCtx(ctx, idle) {
 				return
@@ -252,6 +263,7 @@ func (m *ClientManager) runHomeLoop(ctx context.Context, transport Transport, do
 		m.mu.Lock()
 		m.homeConnected = false
 		m.mu.Unlock()
+		m.notifyHomeStateChange()
 
 		err := transport.ConnectHome(ctx, homeNode)
 		if err == nil {
@@ -260,6 +272,7 @@ func (m *ClientManager) runHomeLoop(ctx context.Context, transport Transport, do
 				m.homeConnected = true
 			}
 			m.mu.Unlock()
+			m.notifyHomeStateChange()
 			current = initial // reset backoff on success
 			if !sleepCtx(ctx, idle) {
 				return
@@ -320,6 +333,7 @@ func (m *ClientManager) Close() error {
 	if transport != nil {
 		_ = transport.CloseHome()
 	}
+	m.notifyHomeStateChange()
 	return nil
 }
 
@@ -330,6 +344,45 @@ func (m *ClientManager) Ready() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.ready
+}
+
+// SetOnHomeStateChange registers a callback invoked when the home connection
+// state transitions between connected and disconnected. The callback is called
+// without holding the manager lock and may re-enter the manager (for example to
+// read HomeConnected). It is safe to call before Start; setting nil clears a
+// previously registered callback.
+func (m *ClientManager) SetOnHomeStateChange(fn func()) {
+	m.mu.Lock()
+	m.onHomeStateChange = fn
+	m.mu.Unlock()
+}
+
+// effectiveHomeConnectedLocked mirrors HomeConnected's logic assuming m.mu is
+// already held. transport.HomeConnected takes the transport's own lock, which is
+// distinct from m.mu and never re-enters the manager, so this does not
+// self-deadlock.
+func (m *ClientManager) effectiveHomeConnectedLocked() bool {
+	if m.closed || !m.homeConnected || m.transport == nil {
+		return false
+	}
+	return m.transport.HomeConnected()
+}
+
+// notifyHomeStateChange fires onHomeStateChange when the effective home
+// connection state has changed since the last notification. Callers must NOT
+// hold m.mu: the callback may re-enter the manager (e.g. via HomeConnected).
+func (m *ClientManager) notifyHomeStateChange() {
+	m.mu.Lock()
+	current := m.effectiveHomeConnectedLocked()
+	cb := m.onHomeStateChange
+	changed := current != m.homeNotified
+	if changed {
+		m.homeNotified = current
+	}
+	m.mu.Unlock()
+	if changed && cb != nil {
+		cb()
+	}
 }
 
 // HomeConnected reports whether the long-lived home connection is currently up.

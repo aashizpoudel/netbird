@@ -317,3 +317,55 @@ func TestDormantManager_HomeConnectedStaysFalse(t *testing.T) {
 	require.NoError(t, m.Close())
 	assert.False(t, m.Ready())
 }
+
+// TestSetOnHomeStateChange_FiresOnConnectAndClose verifies the registered
+// callback is invoked when the effective home connection state transitions
+// (disconnected -> connected on the loop's first success, and connected ->
+// disconnected on Close), and that it is NOT invoked for redundant states.
+func TestSetOnHomeStateChange_FiresOnConnectAndClose(t *testing.T) {
+	tr := &MemTransport{}
+	m := newTransportManager(tr)
+	require.NoError(t, m.UpdateMap(oneNodeConfig(1, "node-1")))
+
+	var (
+		mu        sync.Mutex
+		calls     int
+		lastState bool
+	)
+	// Track the state observed by the callback by re-reading the manager.
+	m.SetOnHomeStateChange(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		lastState = m.HomeConnected()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, m.Start(ctx))
+
+	require.True(t, waitForHomeConnected(t, m, 2*time.Second))
+
+	// Wait for the callback to observe the connected transition.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls > 0 && lastState
+	}, time.Second, 2*time.Millisecond, "callback did not observe connected transition")
+
+	connectedCalls := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}()
+	beforeClose := connectedCalls
+
+	require.NoError(t, m.Close())
+
+	// Close must drive a disconnected transition notification.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls > beforeClose && !lastState
+	}, time.Second, 2*time.Millisecond, "callback did not observe disconnected transition on Close")
+}

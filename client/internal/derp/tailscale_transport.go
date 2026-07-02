@@ -156,6 +156,7 @@ func (t *TailscaleTransport) OpenPeerStream(ctx context.Context, remoteKey strin
 
 	conn := newPacketConn(t, entry, remotePub)
 	t.registerConn(remotePub, conn)
+	logrus.Debugf("derp[trace]: OpenPeerStream for %s created conn %p", remotePub.ShortString(), conn)
 	return conn, nil
 }
 
@@ -242,12 +243,14 @@ func (t *TailscaleTransport) recvLoop(entry *derpClientEntry, clientKey string) 
 			if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
 				logrus.Debugf("derp: receive loop for node %q stopped: %v", entry.node.ID, err)
 			}
+			logrus.Debugf("derp[trace]: recvLoop for node %q exiting", entry.node.ID)
 			return
 		}
 
 		switch m := msg.(type) {
 		case tsderp.ReceivedPacket:
 			data := append([]byte(nil), m.Data...)
+			logrus.Debugf("derp[trace]: recvLoop got ReceivedPacket from %s len=%d", m.Source.ShortString(), len(data))
 			t.dispatchPacket(m.Source, data)
 		case tsderp.PingMessage:
 			if err := entry.client.SendPong([8]byte(m)); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -261,12 +264,18 @@ func (t *TailscaleTransport) recvLoop(entry *derpClientEntry, clientKey string) 
 
 func (t *TailscaleTransport) dispatchPacket(source tskey.NodePublic, data []byte) {
 	t.mu.Lock()
-	conns := make([]*packetConn, 0, len(t.conns[nodePublicMapKey(source)]))
-	for conn := range t.conns[nodePublicMapKey(source)] {
+	key := nodePublicMapKey(source)
+	conns := make([]*packetConn, 0, len(t.conns[key]))
+	for conn := range t.conns[key] {
 		conns = append(conns, conn)
 	}
 	t.mu.Unlock()
 
+	if len(conns) == 0 {
+		logrus.Warnf("derp[trace]: dispatchPacket from %s len=%d DROP (no registered packetConn)", source.ShortString(), len(data))
+		return
+	}
+	logrus.Debugf("derp[trace]: dispatchPacket from %s len=%d -> %d conn(s)", source.ShortString(), len(data), len(conns))
 	for _, conn := range conns {
 		conn.deliver(data)
 	}
@@ -279,7 +288,9 @@ func (t *TailscaleTransport) registerConn(remote tskey.NodePublic, conn *packetC
 	if t.conns[key] == nil {
 		t.conns[key] = make(map[*packetConn]struct{})
 	}
+	n := len(t.conns[key])
 	t.conns[key][conn] = struct{}{}
+	logrus.Debugf("derp[trace]: registerConn %s conn %p (now %d conn(s) for peer)", remote.ShortString(), conn, n+1)
 }
 
 func (t *TailscaleTransport) unregisterConn(remote tskey.NodePublic, conn *packetConn) {
@@ -287,9 +298,11 @@ func (t *TailscaleTransport) unregisterConn(remote tskey.NodePublic, conn *packe
 	defer t.mu.Unlock()
 	key := nodePublicMapKey(remote)
 	delete(t.conns[key], conn)
-	if len(t.conns[key]) == 0 {
+	remaining := len(t.conns[key])
+	if remaining == 0 {
 		delete(t.conns, key)
 	}
+	logrus.Debugf("derp[trace]: unregisterConn %s conn %p (now %d conn(s) for peer)", remote.ShortString(), conn, remaining)
 }
 
 func (t *TailscaleTransport) allConnsLocked() []*packetConn {
@@ -400,7 +413,24 @@ func (c *packetConn) LocalAddr() net.Addr {
 }
 
 func (c *packetConn) RemoteAddr() net.Addr {
-	return derpAddr("derp-" + c.remote.ShortString())
+	return derpAddr(derpRemoteAddrString(c.entry.node, c.remote))
+}
+
+// derpRemoteAddrString renders the relay address reported by netbird status.
+// It surfaces the DERP server the stream is relayed through (the remote peer's
+// home node hostname from the DERP map), falling back to the node URL, ID, or
+// finally the peer's short public key so the value is never empty.
+func derpRemoteAddrString(node Node, remote tskey.NodePublic) string {
+	switch {
+	case node.Hostname != "":
+		return "derp-via-" + node.Hostname
+	case node.URL != "":
+		return "derp-via-" + node.URL
+	case node.ID != "":
+		return "derp-via-" + node.ID
+	default:
+		return "derp-" + remote.ShortString()
+	}
 }
 
 func (c *packetConn) SetDeadline(t time.Time) error {
@@ -428,9 +458,11 @@ func (c *packetConn) SetWriteDeadline(t time.Time) error {
 func (c *packetConn) deliver(data []byte) {
 	select {
 	case <-c.closeCh:
+		logrus.Debugf("derp[trace]: deliver to %s DROP (closed)", c.remote.ShortString())
 	case c.inbox <- data:
+		logrus.Debugf("derp[trace]: deliver to %s len=%d OK (inbox len=%d)", c.remote.ShortString(), len(data), len(c.inbox))
 	default:
-		logrus.Debugf("derp: dropping packet from %s because peer inbox is full", c.remote.ShortString())
+		logrus.Warnf("derp[trace]: deliver to %s DROP (inbox full)", c.remote.ShortString())
 	}
 }
 

@@ -184,6 +184,7 @@ func (p *ProxyBind) proxyToLocal(ctx context.Context) {
 		n, err := p.remoteConn.Read(buf)
 		if err != nil {
 			if ctx.Err() != nil {
+				log.Debugf("derp[trace]: proxyToLocal read err (ctx done): %v", err)
 				return
 			}
 			p.closeListener.Notify()
@@ -191,11 +192,14 @@ func (p *ProxyBind) proxyToLocal(ctx context.Context) {
 			return
 		}
 
+		log.Debugf("derp[trace]: proxyToLocal read %d bytes from %s", n, p.remoteConn.RemoteAddr())
+
 		p.pausedCond.L.Lock()
 		for p.paused {
 			p.pausedCond.Wait()
 		}
 
+		log.Debugf("derp[trace]: proxyToLocal -> ReceiveFromEndpoint %d bytes (paused=%v)", n, p.paused)
 		p.bind.ReceiveFromEndpoint(ctx, p.wgCurrentUsed, buf[:n])
 		p.pausedCond.L.Unlock()
 	}

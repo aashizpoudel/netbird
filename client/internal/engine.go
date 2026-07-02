@@ -330,6 +330,12 @@ func NewEngine(
 	}
 
 	log.Infof("I am: %s", config.WgPrivateKey.PublicKey().String())
+
+	// Refresh cached DERP status whenever the home connection state transitions
+	// (connect/drop/shutdown). Without this, "home connected" in netbird status
+	// stays stuck at the value captured during the last config update.
+	engine.derpManager.SetOnHomeStateChange(engine.publishDERPState)
+
 	return engine
 }
 
