@@ -55,6 +55,9 @@ type CredentialPayload struct {
 	RelaySrvAddress string
 	RelaySrvIP      netip.Addr
 	SessionID       []byte
+	// DERPState is optional. A nil value keeps the serialized Body byte-identical
+	// to pre-DERP offers/answers so older peers keep decoding cleanly.
+	DERPState *proto.DERPPeerState
 }
 
 // UnMarshalCredential parses the credentials from the message and returns a Credential instance
@@ -88,6 +91,11 @@ func MarshalCredential(myKey wgtypes.Key, remoteKey string, p CredentialPayload)
 	}
 	if p.RelaySrvIP.IsValid() {
 		body.RelayServerIP = p.RelaySrvIP.Unmap().AsSlice()
+	}
+	// Only attach DERP state when present; a nil field keeps the wire format
+	// identical to pre-DERP messages for backward compatibility.
+	if p.DERPState != nil {
+		body.DerpPeerState = p.DERPState
 	}
 	return &proto.Message{
 		Key:       myKey.PublicKey().String(),

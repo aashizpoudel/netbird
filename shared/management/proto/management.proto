@@ -312,6 +312,8 @@ message NetbirdConfig {
   RelayConfig relay = 4;
 
   FlowConfig flow = 5;
+
+  DERPConfig derp = 6;
 }
 
 // HostConfig describes connection properties of some server (e.g. STUN, Signal, Management)
@@ -333,6 +335,35 @@ message RelayConfig {
   repeated string urls = 1;
   string tokenPayload = 2;
   string tokenSignature = 3;
+}
+
+message DERPConfig {
+  bool enabled = 1;
+  repeated DERPRegion regions = 2;
+  DERPSelectionPolicy selectionPolicy = 3;
+  DERPPriority priority = 4;
+}
+
+message DERPRegion {
+  int32 id = 1;
+  string name = 2;
+  repeated DERPNode nodes = 3;
+}
+
+message DERPNode {
+  string id = 1;
+  string url = 2;
+  bytes publicKey = 3;
+  string hostname = 4;
+  int32 regionId = 5;
+  bool stunOnly = 6;
+}
+
+message DERPSelectionPolicy {
+  repeated int32 allowedRegionIds = 1;
+  repeated int32 deniedRegionIds = 2;
+  int32 preferredRegionId = 3;
+  bool autoSelect = 4;
 }
 
 message FlowConfig {
@@ -751,3 +782,9 @@ message StopExposeRequest {
 }
 
 message StopExposeResponse {}
+
+enum DERPPriority {
+  DERP_PRIORITY_UNSPECIFIED = 0;
+  DERP_PRIORITY_AFTER_NETBIRD_RELAY = 1;
+  DERP_PRIORITY_BEFORE_NETBIRD_RELAY = 2;
+}

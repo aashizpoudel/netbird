@@ -75,6 +75,8 @@ message Body {
   // fallback dial target when DNS resolution of relayServerAddress fails.
   // SNI/TLS verification still uses relayServerAddress.
   optional bytes relayServerIP = 11;
+
+  DERPPeerState derpPeerState = 12;
 }
 
 // Mode indicates a connection mode
@@ -86,4 +88,13 @@ message RosenpassConfig {
   bytes rosenpassPubKey = 1;
   // rosenpassServerAddr is an IP:port of the rosenpass service
   string rosenpassServerAddr = 2;
+}
+
+message DERPPeerState {
+  bool enabled = 1;
+  bool capable = 2;
+  int32 homeRegionId = 3;
+  string homeNodeId = 4;
+  bytes homeNodePublicKey = 5;
+  uint64 generation = 6;
 }

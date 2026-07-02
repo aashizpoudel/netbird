@@ -35,6 +35,7 @@ import (
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
 	"github.com/netbirdio/netbird/client/internal/acl"
 	"github.com/netbirdio/netbird/client/internal/debug"
+	"github.com/netbirdio/netbird/client/internal/derp"
 	"github.com/netbirdio/netbird/client/internal/dns"
 	dnsconfig "github.com/netbirdio/netbird/client/internal/dns/config"
 	"github.com/netbirdio/netbird/client/internal/dnsfwd"
@@ -234,6 +235,7 @@ type Engine struct {
 	checks []*mgmProto.Checks
 
 	relayManager       *relayClient.Manager
+	derpManager        *derp.ClientManager
 	stateManager       *statemanager.Manager
 	portForwardManager *portforward.Manager
 	srWatcher          *guard.SRWatcher
@@ -302,6 +304,7 @@ func NewEngine(
 		signaler:           peer.NewSignaler(services.SignalClient, config.WgPrivateKey),
 		mgmClient:          services.MgmClient,
 		relayManager:       services.RelayManager,
+		derpManager:        derp.NewManager(),
 		peerStore:          peerstore.NewConnStore(),
 		syncMsgMux:         &sync.Mutex{},
 		config:             config,
@@ -990,6 +993,10 @@ func (e *Engine) updateNetbirdConfig(wCfg *mgmProto.NetbirdConfig) error {
 	e.stunTurn.Store(stunTurn)
 
 	if err := e.handleRelayUpdate(wCfg.GetRelay()); err != nil {
+		return err
+	}
+
+	if err := e.handleDERPUpdate(wCfg.GetDerp()); err != nil {
 		return err
 	}
 
@@ -1772,6 +1779,7 @@ func (e *Engine) createPeerConn(pubKey string, allowedIPs []netip.Prefix, agentV
 		Signaler:           e.signaler,
 		IFaceDiscover:      e.mobileDep.IFaceDiscover,
 		RelayManager:       e.relayManager,
+		DERPManager:        &derpManagerAdapter{manager: e.derpManager},
 		SrWatcher:          e.srWatcher,
 		PortForwardManager: e.portForwardManager,
 		MetricsRecorder:    e.clientMetrics,
@@ -1947,6 +1955,10 @@ func (e *Engine) close() {
 
 	if e.rpManager != nil {
 		_ = e.rpManager.Close()
+	}
+
+	if e.derpManager != nil {
+		_ = e.derpManager.Close()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2729,6 +2741,7 @@ func convertToOfferAnswer(msg *sProto.Message) (*peer.OfferAnswer, error) {
 		RelaySrvAddress: msg.GetBody().GetRelayServerAddress(),
 		RelaySrvIP:      relayIP,
 		SessionID:       sessionID,
+		DERPState:       convertSignalDERPPeerState(msg.GetBody().GetDerpPeerState()),
 	}
 	return &offerAnswer, nil
 }

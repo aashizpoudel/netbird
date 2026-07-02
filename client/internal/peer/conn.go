@@ -46,6 +46,7 @@ type ServiceDependencies struct {
 	Signaler           *Signaler
 	IFaceDiscover      stdnet.ExternalIFaceDiscover
 	RelayManager       *relayClient.Manager
+	DERPManager        DERPManager
 	SrWatcher          *guard.SRWatcher
 	PeerConnDispatcher *dispatcher.ConnectionDispatcher
 	PortForwardManager *portforward.Manager
@@ -100,6 +101,7 @@ type Conn struct {
 	signaler           *Signaler
 	iFaceDiscover      stdnet.ExternalIFaceDiscover
 	relayManager       *relayClient.Manager
+	derpManager        DERPManager
 	srWatcher          *guard.SRWatcher
 	portForwardManager *portforward.Manager
 
@@ -108,12 +110,14 @@ type Conn struct {
 	rosenpassInitializedPresharedKeyValidator func(peerKey string) bool
 
 	statusRelay         *worker.AtomicWorkerStatus
+	statusDERP          *worker.AtomicWorkerStatus
 	statusICE           *worker.AtomicWorkerStatus
 	currentConnPriority conntype.ConnPriority
 	opened              bool // this flag is used to prevent close in case of not opened connection
 
 	workerICE   *WorkerICE
 	workerRelay *WorkerRelay
+	workerDERP  *WorkerDERP
 
 	wgWatcher       *WGWatcher
 	wgWatcherWg     sync.WaitGroup
@@ -124,6 +128,7 @@ type Conn struct {
 
 	wgProxyICE   wgproxy.Proxy
 	wgProxyRelay wgproxy.Proxy
+	wgProxyDERP  wgproxy.Proxy
 	handshaker   *Handshaker
 
 	guard *guard.Guard
@@ -189,9 +194,11 @@ func NewConn(config ConnConfig, services ServiceDependencies) (*Conn, error) {
 		signaler:           services.Signaler,
 		iFaceDiscover:      services.IFaceDiscover,
 		relayManager:       services.RelayManager,
+		derpManager:        services.DERPManager,
 		srWatcher:          services.SrWatcher,
 		portForwardManager: services.PortForwardManager,
 		statusRelay:        worker.NewAtomicStatus(),
+		statusDERP:         worker.NewAtomicStatus(),
 		statusICE:          worker.NewAtomicStatus(),
 		dumpState:          dumpState,
 		endpointUpdater:    NewEndpointUpdater(connLog, config.WgConfig, isController(config)),
@@ -229,6 +236,7 @@ func (conn *Conn) open(engineCtx context.Context, firstPacket []byte) error {
 	conn.ctx, conn.ctxCancel = context.WithCancel(engineCtx)
 
 	conn.workerRelay = NewWorkerRelay(conn.ctx, conn.Log, isController(conn.config), conn.config, conn, conn.relayManager)
+	conn.workerDERP = NewWorkerDERP(conn.ctx, conn.Log, conn.config, conn, conn.derpManager)
 
 	forceRelay := IsForceRelayed()
 	if !forceRelay {
@@ -240,9 +248,10 @@ func (conn *Conn) open(engineCtx context.Context, firstPacket []byte) error {
 		conn.workerICE = workerICE
 	}
 
-	conn.handshaker = NewHandshaker(conn.Log, conn.config, conn.signaler, conn.workerICE, conn.workerRelay, conn.metricsStages)
+	conn.handshaker = NewHandshaker(conn.Log, conn.config, conn.signaler, conn.workerICE, conn.workerRelay, conn.workerDERP, conn.metricsStages)
 
 	conn.handshaker.AddRelayListener(conn.workerRelay.OnNewOffer)
+	conn.handshaker.AddDERPListener(conn.workerDERP.OnNewOffer)
 	if !forceRelay {
 		conn.handshaker.AddICEListener(conn.workerICE.OnNewOffer)
 	}
@@ -302,6 +311,7 @@ func (conn *Conn) Close(signalToRemote bool) {
 		conn.wgWatcherCancel()
 	}
 	conn.workerRelay.CloseConn()
+	conn.workerDERP.CloseConn()
 	if conn.workerICE != nil {
 		conn.workerICE.Close()
 	}
@@ -322,6 +332,14 @@ func (conn *Conn) Close(signalToRemote bool) {
 		conn.wgProxyICE = nil
 	}
 
+	if conn.wgProxyDERP != nil {
+		err := conn.wgProxyDERP.CloseConn()
+		if err != nil {
+			conn.Log.Errorf("failed to close wg proxy for DERP: %v", err)
+		}
+		conn.wgProxyDERP = nil
+	}
+
 	if err := conn.endpointUpdater.RemoveWgPeer(); err != nil {
 		conn.Log.Errorf("failed to remove wg endpoint: %v", err)
 	}
@@ -340,7 +358,7 @@ func (conn *Conn) Close(signalToRemote bool) {
 // doesn't block, discards the message if connection wasn't ready
 func (conn *Conn) OnRemoteAnswer(answer OfferAnswer) {
 	conn.dumpState.RemoteAnswer()
-	conn.Log.Infof("OnRemoteAnswer, priority: %s, status ICE: %s, status relay: %s", conn.currentConnPriority, conn.statusICE, conn.statusRelay)
+	conn.Log.Infof("OnRemoteAnswer, priority: %s, status ICE: %s, status relay: %s, status DERP: %s", conn.currentConnPriority, conn.statusICE, conn.statusRelay, conn.statusDERP)
 	conn.handshaker.OnRemoteAnswer(answer)
 }
 
@@ -371,7 +389,7 @@ func (conn *Conn) SetRosenpassInitializedPresharedKeyValidator(handler func(peer
 
 func (conn *Conn) OnRemoteOffer(offer OfferAnswer) {
 	conn.dumpState.RemoteOffer()
-	conn.Log.Infof("OnRemoteOffer, on status ICE: %s, status Relay: %s", conn.statusICE, conn.statusRelay)
+	conn.Log.Infof("OnRemoteOffer, on status ICE: %s, status Relay: %s, status DERP: %s", conn.statusICE, conn.statusRelay, conn.statusDERP)
 	conn.handshaker.OnRemoteOffer(offer)
 }
 
@@ -449,6 +467,9 @@ func (conn *Conn) onICEConnectionIsReady(priority conntype.ConnPriority, iceConn
 	if conn.wgProxyRelay != nil {
 		conn.wgProxyRelay.Pause()
 	}
+	if conn.wgProxyDERP != nil {
+		conn.wgProxyDERP.Pause()
+	}
 
 	if wgProxy != nil {
 		wgProxy.Work()
@@ -468,6 +489,10 @@ func (conn *Conn) onICEConnectionIsReady(priority conntype.ConnPriority, iceConn
 	if conn.wgProxyRelay != nil {
 		conn.Log.Debugf("redirect packets from relayed conn to WireGuard")
 		conn.wgProxyRelay.RedirectAs(ep)
+	}
+	if conn.wgProxyDERP != nil {
+		conn.Log.Debugf("redirect packets from DERP conn to WireGuard")
+		conn.wgProxyDERP.RedirectAs(ep)
 	}
 
 	conn.injectPendingFirstPacket(wgProxy, iceConnInfo.RemoteConn)
@@ -494,8 +519,8 @@ func (conn *Conn) onICEStateDisconnected(sessionChanged bool) {
 		}
 	}
 
-	// switch back to relay connection
-	if conn.isReadyToUpgrade() {
+	// switch back to the best available lower-priority relayed connection
+	if conn.wgProxyRelay != nil {
 		conn.Log.Infof("ICE disconnected, set Relay to active connection")
 		conn.dumpState.SwitchToRelay()
 		if sessionChanged {
@@ -511,8 +536,22 @@ func (conn *Conn) onICEStateDisconnected(sessionChanged bool) {
 		}
 
 		conn.currentConnPriority = conntype.Relay
+	} else if conn.wgProxyDERP != nil {
+		conn.Log.Infof("ICE disconnected, set DERP to active connection")
+		if sessionChanged {
+			conn.resetEndpoint()
+		}
+
+		conn.wgProxyDERP.Work()
+
+		presharedKey := conn.presharedKey(conn.rosenpassRemoteKey)
+		if err := conn.endpointUpdater.SwitchWGEndpoint(conn.wgProxyDERP.EndpointAddr(), presharedKey); err != nil {
+			conn.Log.Errorf("failed to switch to DERP conn: %v", err)
+		}
+
+		conn.currentConnPriority = conntype.DERP
 	} else {
-		conn.Log.Infof("ICE disconnected, do not switch to Relay. Reset priority to: %s", conntype.None.String())
+		conn.Log.Infof("ICE disconnected, do not switch to a relayed connection. Reset priority to: %s", conntype.None.String())
 		conn.currentConnPriority = conntype.None
 		if err := conn.config.WgConfig.WgInterface.RemoveEndpointAddress(conn.config.WgConfig.RemoteKey); err != nil {
 			conn.Log.Errorf("failed to remove wg endpoint: %v", err)
@@ -529,6 +568,10 @@ func (conn *Conn) onICEStateDisconnected(sessionChanged bool) {
 
 	if conn.currentConnPriority == conntype.None {
 		conn.metricsStages.Disconnected()
+	}
+
+	if conn.currentConnPriority == conntype.DERP {
+		return
 	}
 
 	peerState := State{
@@ -575,6 +618,10 @@ func (conn *Conn) onRelayConnectionIsReady(rci RelayConnInfo) {
 		return
 	}
 
+	if conn.wgProxyDERP != nil {
+		conn.wgProxyDERP.Pause()
+	}
+
 	controller := isController(conn.config)
 
 	if controller {
@@ -592,6 +639,10 @@ func (conn *Conn) onRelayConnectionIsReady(rci RelayConnInfo) {
 	if !controller {
 		wgProxy.Work()
 	}
+	if conn.wgProxyDERP != nil {
+		conn.Log.Debugf("redirect packets from DERP conn to relay endpoint")
+		conn.wgProxyDERP.RedirectAs(wgProxy.EndpointAddr())
+	}
 
 	wgConfigWorkaround()
 
@@ -606,10 +657,78 @@ func (conn *Conn) onRelayConnectionIsReady(rci RelayConnInfo) {
 	conn.doOnConnected(rci.rosenpassPubKey, rci.rosenpassAddr, updateTime)
 }
 
+func (conn *Conn) onDERPConnectionIsReady(dci DERPConnInfo) {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+
+	if conn.ctx.Err() != nil {
+		if err := dci.derpConn.Close(); err != nil {
+			conn.Log.Warnf("failed to close unnecessary DERP connection: %v", err)
+		}
+		return
+	}
+
+	conn.Log.Debugf("DERP connection has been established, setup the WireGuard")
+
+	wgProxy, err := conn.newProxy(dci.derpConn)
+	if err != nil {
+		conn.Log.Errorf("failed to add DERP net.Conn to local proxy: %v", err)
+		return
+	}
+	wgProxy.SetDisconnectListener(conn.onDERPDisconnected)
+
+	conn.dumpState.NewLocalProxy()
+
+	conn.Log.Infof("created new wgProxy for DERP connection: %s", wgProxy.EndpointAddr().String())
+
+	if conn.currentConnPriority > conntype.DERP {
+		conn.Log.Debugf("do not switch to DERP because current priority is: %s", conn.currentConnPriority.String())
+		conn.setDERPProxy(wgProxy)
+		conn.statusDERP.SetConnected()
+		conn.updateDERPStatus(dci.derpConn.RemoteAddr().String(), dci.rosenpassPubKey, time.Now())
+		return
+	}
+
+	controller := isController(conn.config)
+	if controller {
+		wgProxy.Work()
+	}
+	updateTime := time.Now()
+	conn.enableWgWatcherIfNeeded(updateTime)
+	if err := conn.endpointUpdater.ConfigureWGEndpoint(wgProxy.EndpointAddr(), conn.presharedKey(dci.rosenpassPubKey)); err != nil {
+		if err := wgProxy.CloseConn(); err != nil {
+			conn.Log.Warnf("Failed to close DERP connection: %v", err)
+		}
+		conn.Log.Errorf("Failed to update WireGuard peer configuration: %v", err)
+		return
+	}
+	if !controller {
+		wgProxy.Work()
+	}
+
+	wgConfigWorkaround()
+
+	conn.injectPendingFirstPacket(wgProxy, nil)
+
+	conn.rosenpassRemoteKey = dci.rosenpassPubKey
+	conn.currentConnPriority = conntype.DERP
+	conn.statusDERP.SetConnected()
+	conn.setDERPProxy(wgProxy)
+	conn.updateDERPStatus(dci.derpConn.RemoteAddr().String(), dci.rosenpassPubKey, updateTime)
+	conn.Log.Infof("start to communicate with peer via DERP")
+	conn.doOnConnected(dci.rosenpassPubKey, dci.rosenpassAddr, updateTime)
+}
+
 func (conn *Conn) onRelayDisconnected() {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	conn.handleRelayDisconnectedLocked()
+}
+
+func (conn *Conn) onDERPDisconnected() {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	conn.handleDERPDisconnectedLocked()
 }
 
 // handleRelayDisconnectedLocked handles relay disconnection. Caller must hold conn.mu.
@@ -621,10 +740,19 @@ func (conn *Conn) handleRelayDisconnectedLocked() {
 	conn.Log.Debugf("relay connection is disconnected")
 
 	if conn.currentConnPriority == conntype.Relay {
-		conn.Log.Debugf("clean up WireGuard config")
-		conn.currentConnPriority = conntype.None
-		if err := conn.config.WgConfig.WgInterface.RemoveEndpointAddress(conn.config.WgConfig.RemoteKey); err != nil {
-			conn.Log.Errorf("failed to remove wg endpoint: %v", err)
+		if conn.wgProxyDERP != nil {
+			conn.Log.Infof("Relay disconnected, set DERP to active connection")
+			conn.wgProxyDERP.Work()
+			if err := conn.endpointUpdater.SwitchWGEndpoint(conn.wgProxyDERP.EndpointAddr(), conn.presharedKey(conn.rosenpassRemoteKey)); err != nil {
+				conn.Log.Errorf("failed to switch to DERP conn: %v", err)
+			}
+			conn.currentConnPriority = conntype.DERP
+		} else {
+			conn.Log.Debugf("clean up WireGuard config")
+			conn.currentConnPriority = conntype.None
+			if err := conn.config.WgConfig.WgInterface.RemoveEndpointAddress(conn.config.WgConfig.RemoteKey); err != nil {
+				conn.Log.Errorf("failed to remove wg endpoint: %v", err)
+			}
 		}
 	}
 
@@ -645,6 +773,10 @@ func (conn *Conn) handleRelayDisconnectedLocked() {
 		conn.metricsStages.Disconnected()
 	}
 
+	if conn.currentConnPriority == conntype.DERP {
+		return
+	}
+
 	peerState := State{
 		PubKey:           conn.config.Key,
 		ConnStatus:       conn.evalStatus(),
@@ -653,6 +785,55 @@ func (conn *Conn) handleRelayDisconnectedLocked() {
 	}
 	if err := conn.statusRecorder.UpdatePeerRelayedStateToDisconnected(peerState); err != nil {
 		conn.Log.Warnf("unable to save peer's state to Relay disconnected, got error: %v", err)
+	}
+}
+
+// handleDERPDisconnectedLocked handles DERP disconnection. Caller must hold conn.mu.
+func (conn *Conn) handleDERPDisconnectedLocked() {
+	if conn.ctx.Err() != nil {
+		return
+	}
+
+	conn.Log.Debugf("DERP connection is disconnected")
+
+	wasActive := conn.currentConnPriority == conntype.DERP
+	if wasActive {
+		conn.Log.Debugf("clean up WireGuard config")
+		conn.currentConnPriority = conntype.None
+		if err := conn.config.WgConfig.WgInterface.RemoveEndpointAddress(conn.config.WgConfig.RemoteKey); err != nil {
+			conn.Log.Errorf("failed to remove wg endpoint: %v", err)
+		}
+	}
+
+	if conn.wgProxyDERP != nil {
+		_ = conn.wgProxyDERP.CloseConn()
+		conn.wgProxyDERP = nil
+	}
+
+	changed := conn.statusDERP.Get() != worker.StatusDisconnected
+	if changed {
+		conn.guard.SetRelayedConnDisconnected()
+	}
+	conn.statusDERP.SetDisconnected()
+
+	conn.disableWgWatcherIfNeeded()
+
+	if conn.currentConnPriority == conntype.None {
+		conn.metricsStages.Disconnected()
+	}
+
+	if !wasActive {
+		return
+	}
+
+	peerState := State{
+		PubKey:           conn.config.Key,
+		ConnStatus:       conn.evalStatus(),
+		Relayed:          conn.isRelayed(),
+		ConnStatusUpdate: time.Now(),
+	}
+	if err := conn.statusRecorder.UpdatePeerRelayedStateToDisconnected(peerState); err != nil {
+		conn.Log.Warnf("unable to save peer's state to DERP disconnected, got error: %v", err)
 	}
 }
 
@@ -675,6 +856,9 @@ func (conn *Conn) onWGDisconnected() {
 
 	// Close the active connection based on current priority
 	switch conn.currentConnPriority {
+	case conntype.DERP:
+		conn.workerDERP.CloseConn()
+		conn.handleDERPDisconnectedLocked()
 	case conntype.Relay:
 		conn.workerRelay.CloseConn()
 		conn.handleRelayDisconnectedLocked()
@@ -701,6 +885,22 @@ func (conn *Conn) updateRelayStatus(relayServerAddr string, rosenpassPubKey []by
 	}
 }
 
+func (conn *Conn) updateDERPStatus(derpRemoteAddr string, rosenpassPubKey []byte, updateTime time.Time) {
+	peerState := State{
+		PubKey:             conn.config.Key,
+		ConnStatusUpdate:   updateTime,
+		ConnStatus:         conn.evalStatus(),
+		Relayed:            conn.isRelayed(),
+		RelayServerAddress: derpRemoteAddr,
+		RosenpassEnabled:   isRosenpassEnabled(rosenpassPubKey),
+	}
+
+	err := conn.statusRecorder.UpdatePeerRelayedState(peerState)
+	if err != nil {
+		conn.Log.Warnf("unable to save peer's DERP state, got error: %v", err)
+	}
+}
+
 func (conn *Conn) updateIceState(iceConnInfo ICEConnInfo, updateTime time.Time) {
 	peerState := State{
 		PubKey:                     conn.config.Key,
@@ -722,6 +922,7 @@ func (conn *Conn) updateIceState(iceConnInfo ICEConnInfo, updateTime time.Time) 
 
 func (conn *Conn) setStatusToDisconnected() {
 	conn.statusRelay.SetDisconnected()
+	conn.statusDERP.SetDisconnected()
 	conn.statusICE.SetDisconnected()
 	conn.currentConnPriority = conntype.None
 
@@ -756,7 +957,7 @@ func (conn *Conn) doOnConnected(remoteRosenpassPubKey []byte, remoteRosenpassAdd
 
 func (conn *Conn) isRelayed() bool {
 	switch conn.currentConnPriority {
-	case conntype.Relay, conntype.ICETurn:
+	case conntype.DERP, conntype.Relay, conntype.ICETurn:
 		return true
 	default:
 		return false
@@ -764,7 +965,7 @@ func (conn *Conn) isRelayed() bool {
 }
 
 func (conn *Conn) evalStatus() ConnStatus {
-	if conn.statusRelay.Get() == worker.StatusConnected || conn.statusICE.Get() == worker.StatusConnected {
+	if conn.statusDERP.Get() == worker.StatusConnected || conn.statusRelay.Get() == worker.StatusConnected || conn.statusICE.Get() == worker.StatusConnected {
 		return StatusConnected
 	}
 
@@ -791,10 +992,17 @@ func (conn *Conn) isConnectedOnAllWay() (status guard.ConnStatus) {
 		iceInProgress = conn.workerICE.InProgress()
 	}
 
+	var peerUsesDERP bool
+	if conn.workerDERP != nil {
+		peerUsesDERP = conn.workerDERP.IsDERPConnectionSupportedWithPeer()
+	}
+	peerUsesRelayFallback := conn.workerRelay.IsRelayConnectionSupportedWithPeer() || peerUsesDERP
+	relayFallbackConnected := conn.statusRelay.Get() == worker.StatusConnected || conn.statusDERP.Get() == worker.StatusConnected
+
 	return evalConnStatus(connStatusInputs{
 		forceRelay:          IsForceRelayed(),
-		peerUsesRelay:       conn.workerRelay.IsRelayConnectionSupportedWithPeer(),
-		relayConnected:      conn.statusRelay.Get() == worker.StatusConnected,
+		peerUsesRelay:       peerUsesRelayFallback,
+		relayConnected:      relayFallbackConnected,
 		remoteSupportsICE:   conn.handshaker.RemoteICESupported(),
 		iceWorkerCreated:    iceWorkerCreated,
 		iceStatusConnecting: conn.statusICE.Get() != worker.StatusDisconnected,
@@ -864,12 +1072,16 @@ func (conn *Conn) handleConfigurationFailure(err error, wgProxy wgproxy.Proxy) {
 	}
 	if conn.wgProxyRelay != nil {
 		conn.wgProxyRelay.Work()
+	} else if conn.wgProxyDERP != nil {
+		conn.wgProxyDERP.Work()
 	}
 }
 
 func (conn *Conn) logTraceConnState() {
 	if conn.workerRelay.IsRelayConnectionSupportedWithPeer() {
-		conn.Log.Tracef("connectivity guard check, relay state: %s, ice state: %s", conn.statusRelay, conn.statusICE)
+		conn.Log.Tracef("connectivity guard check, relay state: %s, DERP state: %s, ice state: %s", conn.statusRelay, conn.statusDERP, conn.statusICE)
+	} else if conn.workerDERP != nil && conn.workerDERP.IsDERPConnectionSupportedWithPeer() {
+		conn.Log.Tracef("connectivity guard check, DERP state: %s, ice state: %s", conn.statusDERP, conn.statusICE)
 	} else {
 		conn.Log.Tracef("connectivity guard check, ice state: %s", conn.statusICE)
 	}
@@ -882,6 +1094,15 @@ func (conn *Conn) setRelayedProxy(proxy wgproxy.Proxy) {
 		}
 	}
 	conn.wgProxyRelay = proxy
+}
+
+func (conn *Conn) setDERPProxy(proxy wgproxy.Proxy) {
+	if conn.wgProxyDERP != nil {
+		if err := conn.wgProxyDERP.CloseConn(); err != nil {
+			conn.Log.Warnf("failed to close deprecated DERP wg proxy conn: %v", err)
+		}
+	}
+	conn.wgProxyDERP = proxy
 }
 
 // onWGHandshakeSuccess is called when the first WireGuard handshake is detected
@@ -903,7 +1124,7 @@ func (conn *Conn) recordConnectionMetrics() {
 
 	var connType metrics.ConnectionType
 	switch priority {
-	case conntype.Relay:
+	case conntype.DERP, conntype.Relay:
 		connType = metrics.ConnectionTypeRelay
 	default:
 		connType = metrics.ConnectionTypeICE

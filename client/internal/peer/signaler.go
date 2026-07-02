@@ -66,6 +66,7 @@ func (s *Signaler) signalOfferAnswer(offerAnswer OfferAnswer, remoteKey string, 
 		RelaySrvAddress: offerAnswer.RelaySrvAddress,
 		RelaySrvIP:      offerAnswer.RelaySrvIP,
 		SessionID:       sessionIDBytes,
+		DERPState:       derpPeerStateToProto(offerAnswer.DERPState),
 	})
 	if err != nil {
 		return err

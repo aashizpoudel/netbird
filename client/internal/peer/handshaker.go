@@ -47,6 +47,10 @@ type OfferAnswer struct {
 	RelaySrvIP netip.Addr
 	// SessionID is the unique identifier of the session, used to discard old messages
 	SessionID *ICESessionID
+
+	// DERPState is optional peer-layer DERP runtime state. It is intentionally local
+	// to the peer package until signal protobuf support lands.
+	DERPState DERPPeerState
 }
 
 func (o *OfferAnswer) hasICECredentials() bool {
@@ -60,6 +64,7 @@ type Handshaker struct {
 	signaler      *Signaler
 	ice           *WorkerICE
 	relay         *WorkerRelay
+	derp          *WorkerDERP
 	metricsStages *MetricsStages
 	// relayListener is not blocking because the listener is using a goroutine to process the messages
 	// and it will only keep the latest message if multiple offers are received in a short time
@@ -67,6 +72,7 @@ type Handshaker struct {
 	// and also to avoid processing old offers if multiple offers are received in a short time
 	// the listener will always process the latest offer
 	relayListener *AsyncOfferListener
+	derpListener  *AsyncOfferListener
 	iceListener   func(remoteOfferAnswer *OfferAnswer)
 
 	// remoteICESupported tracks whether the remote peer includes ICE credentials in its offers/answers.
@@ -79,13 +85,14 @@ type Handshaker struct {
 	remoteAnswerCh chan OfferAnswer
 }
 
-func NewHandshaker(log *log.Entry, config ConnConfig, signaler *Signaler, ice *WorkerICE, relay *WorkerRelay, metricsStages *MetricsStages) *Handshaker {
+func NewHandshaker(log *log.Entry, config ConnConfig, signaler *Signaler, ice *WorkerICE, relay *WorkerRelay, derp *WorkerDERP, metricsStages *MetricsStages) *Handshaker {
 	h := &Handshaker{
 		log:            log,
 		config:         config,
 		signaler:       signaler,
 		ice:            ice,
 		relay:          relay,
+		derp:           derp,
 		metricsStages:  metricsStages,
 		remoteOffersCh: make(chan OfferAnswer),
 		remoteAnswerCh: make(chan OfferAnswer),
@@ -101,6 +108,10 @@ func (h *Handshaker) RemoteICESupported() bool {
 
 func (h *Handshaker) AddRelayListener(offer func(remoteOfferAnswer *OfferAnswer)) {
 	h.relayListener = NewAsyncOfferListener(offer)
+}
+
+func (h *Handshaker) AddDERPListener(offer func(remoteOfferAnswer *OfferAnswer)) {
+	h.derpListener = NewAsyncOfferListener(offer)
 }
 
 func (h *Handshaker) AddICEListener(offer func(remoteOfferAnswer *OfferAnswer)) {
@@ -124,6 +135,10 @@ func (h *Handshaker) Listen(ctx context.Context) {
 				h.relayListener.Notify(&remoteOfferAnswer)
 			}
 
+			if h.derpListener != nil {
+				h.derpListener.Notify(&remoteOfferAnswer)
+			}
+
 			if h.iceListener != nil && h.RemoteICESupported() {
 				h.iceListener(&remoteOfferAnswer)
 			}
@@ -144,6 +159,10 @@ func (h *Handshaker) Listen(ctx context.Context) {
 
 			if h.relayListener != nil {
 				h.relayListener.Notify(&remoteOfferAnswer)
+			}
+
+			if h.derpListener != nil {
+				h.derpListener.Notify(&remoteOfferAnswer)
 			}
 
 			if h.iceListener != nil && h.RemoteICESupported() {
@@ -222,9 +241,17 @@ func (h *Handshaker) buildOfferAnswer() OfferAnswer {
 		answer.SessionID = &sid
 	}
 
-	if addr, ip, err := h.relay.RelayInstanceAddress(); err == nil {
-		answer.RelaySrvAddress = addr
-		answer.RelaySrvIP = ip
+	if h.relay != nil {
+		if addr, ip, err := h.relay.RelayInstanceAddress(); err == nil {
+			answer.RelaySrvAddress = addr
+			answer.RelaySrvIP = ip
+		}
+	}
+
+	if h.derp != nil {
+		if state, ok := h.derp.LocalState(); ok {
+			answer.DERPState = state
+		}
 	}
 
 	return answer
