@@ -151,6 +151,14 @@ func LoadMgmtConfig(ctx context.Context, mgmtConfigPath string) (*nbconfig.Confi
 		return nil, err
 	}
 
+	if err := loadedConfig.ResolveDERPMap(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := loadedConfig.ValidateDERPConfig(); err != nil {
+		return nil, err
+	}
+
 	ApplyCommandLineOverrides(loadedConfig)
 
 	// Apply EmbeddedIdP config to HttpConfig if embedded IdP is enabled

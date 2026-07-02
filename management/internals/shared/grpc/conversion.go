@@ -108,9 +108,67 @@ func toNetbirdConfig(config *nbconfig.Config, turnCredentials *Token, relayToken
 		Turns:  turns,
 		Signal: signalCfg,
 		Relay:  relayCfg,
+		Derp:   toDERPConfig(config.DERP),
 	}
 
 	return nbConfig
+}
+
+func toDERPConfig(config *nbconfig.DERPConfig) *proto.DERPConfig {
+	if config == nil {
+		return nil
+	}
+
+	out := &proto.DERPConfig{
+		Enabled:  config.Enabled,
+		Priority: toDERPPriority(config.Priority),
+	}
+
+	for _, region := range config.Regions {
+		if region == nil {
+			continue
+		}
+		protoRegion := &proto.DERPRegion{
+			Id:   region.ID,
+			Name: region.Name,
+		}
+		for _, node := range region.Nodes {
+			if node == nil {
+				continue
+			}
+			protoRegion.Nodes = append(protoRegion.Nodes, &proto.DERPNode{
+				Id:        node.ID,
+				Url:       node.URL,
+				PublicKey: append([]byte(nil), node.DecodedPublicKey...),
+				Hostname:  node.Hostname,
+				RegionId:  node.RegionID,
+				StunOnly:  node.STUNOnly,
+			})
+		}
+		out.Regions = append(out.Regions, protoRegion)
+	}
+
+	if config.SelectionPolicy != nil {
+		out.SelectionPolicy = &proto.DERPSelectionPolicy{
+			AllowedRegionIds:  append([]int32(nil), config.SelectionPolicy.AllowedRegionIDs...),
+			DeniedRegionIds:   append([]int32(nil), config.SelectionPolicy.DeniedRegionIDs...),
+			PreferredRegionId: config.SelectionPolicy.PreferredRegionID,
+			AutoSelect:        config.SelectionPolicy.AutoSelect,
+		}
+	}
+
+	return out
+}
+
+func toDERPPriority(priority nbconfig.DERPPriority) proto.DERPPriority {
+	switch priority {
+	case nbconfig.DERPPriorityBeforeNetBirdRelay:
+		return proto.DERPPriority_DERP_PRIORITY_BEFORE_NETBIRD_RELAY
+	case nbconfig.DERPPriorityAfterNetBirdRelay:
+		return proto.DERPPriority_DERP_PRIORITY_AFTER_NETBIRD_RELAY
+	default:
+		return proto.DERPPriority_DERP_PRIORITY_UNSPECIFIED
+	}
 }
 
 func toPeerConfig(peer *nbpeer.Peer, network *types.Network, dnsName string, settings *types.Settings, httpConfig *nbconfig.HttpServerConfig, deviceFlowConfig *nbconfig.DeviceAuthorizationFlow, enableSSH bool) *proto.PeerConfig {

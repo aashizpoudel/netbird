@@ -253,6 +253,46 @@ func TestConversionFromFullStatusToOutputOverview(t *testing.T) {
 	assert.Equal(t, overview, convertedResult)
 }
 
+func TestConversionMapsDERPStateAndPeerConnectionType(t *testing.T) {
+	fullStatus := &proto.FullStatus{
+		Peers: []*proto.PeerState{
+			{
+				IP:               "192.168.178.103",
+				PubKey:           "Pubkey3",
+				Fqdn:             "peer-3.awesome-domain.com",
+				ConnStatus:       "Connected",
+				ConnStatusUpdate: timestamppb.New(time.Date(2003, 3, 3, 3, 3, 3, 0, time.UTC)),
+				Relayed:          true,
+				ConnectionType:   "DERP",
+			},
+		},
+		ManagementState: &proto.ManagementState{},
+		SignalState:     &proto.SignalState{},
+		LocalPeerState:  &proto.LocalPeerState{},
+		DerpState: &proto.DERPState{
+			Enabled:       true,
+			HomeRegionID:  10,
+			HomeNodeID:    "derp-10a",
+			Ready:         true,
+			HomeConnected: true,
+			Force:         true,
+		},
+	}
+
+	out := ConvertToStatusOutputOverview(fullStatus, ConvertOptions{})
+
+	require.Len(t, out.Peers.Details, 1)
+	assert.Equal(t, "DERP", out.Peers.Details[0].ConnType)
+	assert.Equal(t, DERPStateOutput{
+		Enabled:       true,
+		HomeRegionID:  10,
+		HomeNodeID:    "derp-10a",
+		Ready:         true,
+		HomeConnected: true,
+		Force:         true,
+	}, out.DERP)
+}
+
 func TestSortingOfPeers(t *testing.T) {
 	peers := []PeerStateDetailOutput{
 		{
@@ -366,6 +406,14 @@ func TestParsingToJSON(t *testing.T) {
                 "error": "context: deadline exceeded"
               }
             ]
+          },
+          "derp": {
+            "enabled": false,
+            "homeRegionID": 0,
+            "homeNodeID": "",
+            "ready": false,
+            "homeConnected": false,
+            "force": false
           },
           "netbirdIp": "192.168.178.100/16",
           "netbirdIpv6": "fd00::100",
@@ -486,6 +534,13 @@ relays:
         - uri: turns:my-awesome-turn.com:443?transport=tcp
           available: false
           error: 'context: deadline exceeded'
+derp:
+    enabled: false
+    homeRegionID: 0
+    homeNodeID: ""
+    ready: false
+    homeConnected: false
+    force: false
 netbirdIp: 192.168.178.100/16
 netbirdIpv6: fd00::100
 publicKey: Some-Pub-Key
@@ -576,6 +631,7 @@ Signal: Connected to my-awesome-signal.com:443
 Relays: 
   [stun:my-awesome-stun.com:3478] is Available
   [turns:my-awesome-turn.com:443?transport=tcp] is Unavailable, reason: context: deadline exceeded
+DERP: Disabled
 Nameservers: 
   [8.8.8.8:53] for [.] is Available
   [1.1.1.1:53, 2.2.2.2:53] for [example.com, example.net] is Unavailable, reason: timeout
@@ -604,6 +660,7 @@ Profile:
 Management: Connected
 Signal: Connected
 Relays: 1/2 Available
+DERP: Disabled
 Nameservers: 1/2 Available
 FQDN: some-localhost.awesome-domain.com
 NetBird IP: 192.168.178.100/16

@@ -66,6 +66,11 @@ type ServerConfig struct {
 	Relays    RelaysConfig `yaml:"relays"`    // External relay servers (disables local relay)
 	SignalURI string       `yaml:"signalUri"` // External signal server (disables local signal)
 
+	// DERP settings (simplified mode). When enabled, the management server
+	// distributes the DERP map to clients and resolves the Tailscale public
+	// map when UseTailscaleDefaultMap is true.
+	DERP *nbconfig.DERPConfig `yaml:"derp"`
+
 	// Management settings (simplified mode)
 	DisableAnonymousMetrics bool               `yaml:"disableAnonymousMetrics"`
 	DisableGeoliteUpdate    bool               `yaml:"disableGeoliteUpdate"`
@@ -697,6 +702,7 @@ func (c *CombinedConfig) ToManagementConfig() (*nbconfig.Config, error) {
 		Stuns:                  stuns,
 		Relay:                  relayConfig,
 		Signal:                 signalConfig,
+		DERP:                   c.Server.DERP,
 		Datadir:                mgmt.DataDir,
 		DataStoreEncryptionKey: mgmt.Store.EncryptionKey,
 		HttpConfig:             httpConfig,

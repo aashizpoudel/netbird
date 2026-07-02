@@ -36,6 +36,11 @@ func GetEnvKeyNBForceRelay() string {
 	return peer.EnvKeyNBForceRelay
 }
 
+// GetEnvKeyNBForceDERP Exports the environment variable for the iOS client
+func GetEnvKeyNBForceDERP() string {
+	return peer.EnvKeyNBForceDERP
+}
+
 // GetEnvKeyNBLazyConn Exports the environment variable for the iOS client
 func GetEnvKeyNBLazyConn() string {
 	return lazyconn.EnvEnableLazyConn

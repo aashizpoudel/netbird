@@ -270,7 +270,7 @@ func TestOpenPeerConn_WithTransportHandlerErrorWrapped(t *testing.T) {
 		return nil, refused
 	})
 
-	_, err := m.OpenPeerConn(ctx, "remote", PeerState{Enabled: true})
+	_, err := m.OpenPeerConn(ctx, "remote", PeerState{Enabled: true, HomeRegionID: 1, HomeNodeID: "node-1"})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrNotConnected), "outer wrapper must be ErrNotConnected")
 	assert.ErrorIs(t, err, refused)

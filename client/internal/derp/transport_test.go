@@ -21,7 +21,7 @@ func TestNoopTransport(t *testing.T) {
 	assert.NoError(t, tr.ConnectHome(context.Background(), Node{ID: "n1"}))
 	assert.False(t, tr.HomeConnected(), "noopTransport never reports connected")
 
-	conn, err := tr.OpenPeerStream(context.Background(), "remote", PeerState{Enabled: true})
+	conn, err := tr.OpenPeerStream(context.Background(), "remote", PeerState{Enabled: true}, Node{})
 	assert.Nil(t, conn)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrNotConnected))
@@ -89,7 +89,7 @@ func TestMemTransport_OpenPeerStreamRequiresHome(t *testing.T) {
 		return nil, nil
 	})
 
-	conn, err := tr.OpenPeerStream(context.Background(), "remote", PeerState{Enabled: true})
+	conn, err := tr.OpenPeerStream(context.Background(), "remote", PeerState{Enabled: true}, Node{})
 	assert.Nil(t, conn)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrNotConnected))
@@ -99,7 +99,7 @@ func TestMemTransport_OpenPeerStreamNoHandler(t *testing.T) {
 	tr := &MemTransport{}
 	require.NoError(t, tr.ConnectHome(context.Background(), Node{ID: "home-1"}))
 
-	conn, err := tr.OpenPeerStream(context.Background(), "remote", PeerState{Enabled: true})
+	conn, err := tr.OpenPeerStream(context.Background(), "remote", PeerState{Enabled: true}, Node{})
 	assert.Nil(t, conn)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrNotImplemented), "no handler should yield ErrNotImplemented")
@@ -119,7 +119,7 @@ func TestMemTransport_OpenPeerStreamReturnsWorkingPipe(t *testing.T) {
 		return client, nil
 	})
 
-	clientConn, err := tr.OpenPeerStream(context.Background(), "remote-key", PeerState{Enabled: true, HomeRegionID: 7})
+	clientConn, err := tr.OpenPeerStream(context.Background(), "remote-key", PeerState{Enabled: true, HomeRegionID: 7}, Node{ID: "home-1", RegionID: 7})
 	require.NoError(t, err)
 	require.NotNil(t, clientConn)
 
@@ -202,7 +202,7 @@ func TestMemTransport_OpenPeerStreamHandlerError(t *testing.T) {
 		return nil, refused
 	})
 
-	conn, err := tr.OpenPeerStream(context.Background(), "remote", PeerState{Enabled: true})
+	conn, err := tr.OpenPeerStream(context.Background(), "remote", PeerState{Enabled: true}, Node{})
 	assert.Nil(t, conn)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, refused)
@@ -225,7 +225,7 @@ func TestMemTransport_ConcurrentSafe(t *testing.T) {
 			defer wg.Done()
 			_ = tr.ConnectHome(context.Background(), Node{ID: "home"})
 			_ = tr.HomeConnected()
-			c, _ := tr.OpenPeerStream(context.Background(), "r", PeerState{Enabled: true})
+			c, _ := tr.OpenPeerStream(context.Background(), "r", PeerState{Enabled: true}, Node{})
 			if c != nil {
 				_ = c.Close()
 			}

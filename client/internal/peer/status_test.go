@@ -209,6 +209,39 @@ func TestUpdateLocalPeerState(t *testing.T) {
 	assert.Equal(t, localPeerState, status.localPeer, "local peer status should be equal")
 }
 
+func TestFullStatusToProtoIncludesDERPAndConnectionType(t *testing.T) {
+	fs := FullStatus{
+		DERPState: DERPState{
+			Enabled:       true,
+			HomeRegionID:  10,
+			HomeNodeID:    "derp-10a",
+			Ready:         true,
+			HomeConnected: true,
+			Force:         true,
+		},
+		Peers: []State{
+			{
+				PubKey:         "peer-key",
+				ConnStatus:     StatusConnected,
+				Relayed:        true,
+				ConnectionType: "DERP",
+				Mux:            new(sync.RWMutex),
+			},
+		},
+	}
+
+	pb := fs.ToProto()
+
+	assert.Equal(t, "DERP", pb.GetPeers()[0].GetConnectionType())
+	assert.True(t, pb.GetPeers()[0].GetRelayed())
+	assert.Equal(t, int32(10), pb.GetDerpState().GetHomeRegionID())
+	assert.Equal(t, "derp-10a", pb.GetDerpState().GetHomeNodeID())
+	assert.True(t, pb.GetDerpState().GetEnabled())
+	assert.True(t, pb.GetDerpState().GetReady())
+	assert.True(t, pb.GetDerpState().GetHomeConnected())
+	assert.True(t, pb.GetDerpState().GetForce())
+}
+
 func TestCleanLocalPeerState(t *testing.T) {
 	emptyLocalPeerState := LocalPeerState{}
 	localPeerState := LocalPeerState{

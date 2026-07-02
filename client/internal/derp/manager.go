@@ -92,30 +92,50 @@ func NewManagerWithTransport(t Transport) *ClientManager {
 // UpdateMap stores config and selects a deterministic home node.
 func (m *ClientManager) UpdateMap(config *Config) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if m.closed {
+		m.mu.Unlock()
 		return errors.New("derp manager closed")
 	}
 
 	m.generation++
+	oldHomeNode := m.homeNode
 	m.config = cloneConfig(config)
 	m.homeRegion = Region{}
 	m.homeNode = Node{}
 	m.ready = false
+	transport := m.transport
 
 	if config == nil || !config.Enabled {
+		m.homeConnected = false
+		m.mu.Unlock()
+		if transport != nil {
+			_ = transport.CloseHome()
+		}
 		return nil
 	}
 
 	region, node, err := selectHome(m.config)
 	if err != nil {
+		m.homeConnected = false
+		m.mu.Unlock()
+		if transport != nil {
+			_ = transport.CloseHome()
+		}
 		return err
 	}
 
 	m.homeRegion = region
 	m.homeNode = node
 	m.ready = true
+	closeHome := transport != nil && oldHomeNode.ID != "" && nodeMapKey(oldHomeNode) != nodeMapKey(node)
+	if closeHome {
+		m.homeConnected = false
+	}
+	m.mu.Unlock()
+	if closeHome {
+		_ = transport.CloseHome()
+	}
 	return nil
 }
 
@@ -208,6 +228,10 @@ func (m *ClientManager) runHomeLoop(ctx context.Context, transport Transport, do
 		}
 
 		if !enabled || homeNode.ID == "" {
+			_ = transport.CloseHome()
+			m.mu.Lock()
+			m.homeConnected = false
+			m.mu.Unlock()
 			// No home selected yet; wait for UpdateMap to provide one.
 			if !sleepCtx(ctx, idle) {
 				return
@@ -314,8 +338,17 @@ func (m *ClientManager) Ready() bool {
 // false.
 func (m *ClientManager) HomeConnected() bool {
 	m.mu.RLock()
+	transport := m.transport
+	cached := m.homeConnected
+	closed := m.closed
 	defer m.mu.RUnlock()
-	return m.homeConnected
+	if closed || !cached {
+		return false
+	}
+	if transport == nil {
+		return false
+	}
+	return transport.HomeConnected()
 }
 
 // LocalState returns the DERP state that should be advertised to remote peers.
@@ -352,6 +385,7 @@ func (m *ClientManager) OpenPeerConn(ctx context.Context, remoteKey string, remo
 	m.mu.RLock()
 	transport := m.transport
 	ready := m.ready
+	remoteNode, remoteNodeOK := m.resolveRemoteNodeLocked(remote)
 	m.mu.RUnlock()
 
 	if transport == nil {
@@ -372,12 +406,36 @@ func (m *ClientManager) OpenPeerConn(ctx context.Context, remoteKey string, remo
 	if remoteKey == "" || !remote.Enabled {
 		return nil, fmt.Errorf("%w: remote peer has no DERP state", ErrNotConnected)
 	}
+	if !remoteNodeOK {
+		return nil, fmt.Errorf("%w: remote DERP home node unavailable", ErrNotConnected)
+	}
 
-	conn, err := transport.OpenPeerStream(ctx, remoteKey, remote)
+	conn, err := transport.OpenPeerStream(ctx, remoteKey, remote, remoteNode)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrNotConnected, err)
 	}
 	return conn, nil
+}
+
+func (m *ClientManager) resolveRemoteNodeLocked(remote PeerState) (Node, bool) {
+	if !remote.Enabled || remote.HomeRegionID == 0 || remote.HomeNodeID == "" {
+		return Node{}, false
+	}
+	for _, region := range m.config.Regions {
+		if region.ID != remote.HomeRegionID {
+			continue
+		}
+		for _, node := range region.Nodes {
+			if node.ID != remote.HomeNodeID || node.STUNOnly {
+				continue
+			}
+			if node.RegionID != 0 && node.RegionID != region.ID {
+				continue
+			}
+			return node, true
+		}
+	}
+	return Node{}, false
 }
 
 func selectHome(config Config) (Region, Node, error) {

@@ -59,6 +59,7 @@ type State struct {
 	ConnStatus                 ConnStatus
 	ConnStatusUpdate           time.Time
 	Relayed                    bool
+	ConnectionType             string
 	LocalIceCandidateType      string
 	RemoteIceCandidateType     string
 	LocalIceCandidateEndpoint  string
@@ -141,6 +142,16 @@ type RosenpassState struct {
 	Permissive bool
 }
 
+// DERPState contains the latest local DERP manager state.
+type DERPState struct {
+	Enabled       bool
+	HomeRegionID  int
+	HomeNodeID    string
+	Ready         bool
+	HomeConnected bool
+	Force         bool
+}
+
 // NSGroupState represents the status of a DNS server group, including associated domains,
 // whether it's enabled, and the last error message encountered during probing.
 type NSGroupState struct {
@@ -158,6 +169,7 @@ type FullStatus struct {
 	SignalState           SignalState
 	LocalPeerState        LocalPeerState
 	RosenpassState        RosenpassState
+	DERPState             DERPState
 	Relays                []relay.ProbeResult
 	NSGroupStates         []NSGroupState
 	NumOfForwardingRules  int
@@ -208,6 +220,7 @@ type Status struct {
 	notifier              *notifier
 	rosenpassEnabled      bool
 	rosenpassPermissive   bool
+	derpState             DERPState
 	nsGroupStates         []NSGroupState
 	resolvedDomainsStates map[domain.Domain]ResolvedDomainInfo
 	lazyConnectionEnabled bool
@@ -377,6 +390,7 @@ func (d *Status) UpdatePeerState(receivedState State) error {
 		peerState.ConnStatus = receivedState.ConnStatus
 		peerState.ConnStatusUpdate = receivedState.ConnStatusUpdate
 		peerState.Relayed = receivedState.Relayed
+		peerState.ConnectionType = receivedState.ConnectionType
 		peerState.LocalIceCandidateType = receivedState.LocalIceCandidateType
 		peerState.RemoteIceCandidateType = receivedState.RemoteIceCandidateType
 		peerState.LocalIceCandidateEndpoint = receivedState.LocalIceCandidateEndpoint
@@ -479,6 +493,7 @@ func (d *Status) UpdatePeerICEState(receivedState State) error {
 	peerState.ConnStatus = receivedState.ConnStatus
 	peerState.ConnStatusUpdate = receivedState.ConnStatusUpdate
 	peerState.Relayed = receivedState.Relayed
+	peerState.ConnectionType = receivedState.ConnectionType
 	peerState.LocalIceCandidateType = receivedState.LocalIceCandidateType
 	peerState.RemoteIceCandidateType = receivedState.RemoteIceCandidateType
 	peerState.LocalIceCandidateEndpoint = receivedState.LocalIceCandidateEndpoint
@@ -518,6 +533,7 @@ func (d *Status) UpdatePeerRelayedState(receivedState State) error {
 	peerState.ConnStatus = receivedState.ConnStatus
 	peerState.ConnStatusUpdate = receivedState.ConnStatusUpdate
 	peerState.Relayed = receivedState.Relayed
+	peerState.ConnectionType = receivedState.ConnectionType
 	peerState.RelayServerAddress = receivedState.RelayServerAddress
 	peerState.RosenpassEnabled = receivedState.RosenpassEnabled
 
@@ -553,6 +569,7 @@ func (d *Status) UpdatePeerRelayedStateToDisconnected(receivedState State) error
 
 	peerState.ConnStatus = receivedState.ConnStatus
 	peerState.Relayed = receivedState.Relayed
+	peerState.ConnectionType = receivedState.ConnectionType
 	peerState.ConnStatusUpdate = receivedState.ConnStatusUpdate
 	peerState.RelayServerAddress = ""
 
@@ -588,6 +605,7 @@ func (d *Status) UpdatePeerICEStateToDisconnected(receivedState State) error {
 
 	peerState.ConnStatus = receivedState.ConnStatus
 	peerState.Relayed = receivedState.Relayed
+	peerState.ConnectionType = receivedState.ConnectionType
 	peerState.ConnStatusUpdate = receivedState.ConnStatusUpdate
 	peerState.LocalIceCandidateType = receivedState.LocalIceCandidateType
 	peerState.RemoteIceCandidateType = receivedState.RemoteIceCandidateType
@@ -882,6 +900,12 @@ func (d *Status) UpdateLazyConnection(enabled bool) {
 	d.lazyConnectionEnabled = enabled
 }
 
+func (d *Status) UpdateDERPState(state DERPState) {
+	d.mux.Lock()
+	defer d.mux.Unlock()
+	d.derpState = state
+}
+
 // MarkSignalDisconnected sets SignalState to disconnected
 func (d *Status) MarkSignalDisconnected(err error) {
 	d.mux.Lock()
@@ -956,6 +980,12 @@ func (d *Status) GetRosenpassState() RosenpassState {
 		d.rosenpassEnabled,
 		d.rosenpassPermissive,
 	}
+}
+
+func (d *Status) GetDERPState() DERPState {
+	d.mux.RLock()
+	defer d.mux.RUnlock()
+	return d.derpState
 }
 
 func (d *Status) GetLazyConnection() bool {
@@ -1088,6 +1118,7 @@ func (d *Status) GetFullStatus() FullStatus {
 		SignalState:           d.GetSignalState(),
 		Relays:                d.GetRelayStates(),
 		RosenpassState:        d.GetRosenpassState(),
+		DERPState:             d.GetDERPState(),
 		NSGroupStates:         d.GetDNSStates(),
 		NumOfForwardingRules:  len(d.ForwardingRules()),
 		LazyConnectionEnabled: d.GetLazyConnection(),
@@ -1381,6 +1412,14 @@ func (fs FullStatus) ToProto() *proto.FullStatus {
 	pbFullStatus.LocalPeerState.RosenpassEnabled = fs.RosenpassState.Enabled
 	pbFullStatus.NumberOfForwardingRules = int32(fs.NumOfForwardingRules)
 	pbFullStatus.LazyConnectionEnabled = fs.LazyConnectionEnabled
+	pbFullStatus.DerpState = &proto.DERPState{
+		Enabled:       fs.DERPState.Enabled,
+		HomeRegionID:  int32(fs.DERPState.HomeRegionID),
+		HomeNodeID:    fs.DERPState.HomeNodeID,
+		Ready:         fs.DERPState.Ready,
+		HomeConnected: fs.DERPState.HomeConnected,
+		Force:         fs.DERPState.Force,
+	}
 
 	pbFullStatus.LocalPeerState.Networks = maps.Keys(fs.LocalPeerState.Routes)
 
@@ -1394,6 +1433,7 @@ func (fs FullStatus) ToProto() *proto.FullStatus {
 			ConnStatus:                 peerState.ConnStatus.String(),
 			ConnStatusUpdate:           timestamppb.New(peerState.ConnStatusUpdate),
 			Relayed:                    peerState.Relayed,
+			ConnectionType:             peerState.ConnectionType,
 			LocalIceCandidateType:      peerState.LocalIceCandidateType,
 			RemoteIceCandidateType:     peerState.RemoteIceCandidateType,
 			LocalIceCandidateEndpoint:  peerState.LocalIceCandidateEndpoint,

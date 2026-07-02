@@ -50,6 +50,53 @@ func TestEvalConnStatus_ForceRelay(t *testing.T) {
 	}
 }
 
+func TestEvalConnStatus_ForceDERP(t *testing.T) {
+	tests := []struct {
+		name string
+		in   connStatusInputs
+		want guard.ConnStatus
+	}{
+		{
+			name: "force DERP, peer uses DERP, DERP up",
+			in: connStatusInputs{
+				forceDERP:     true,
+				peerUsesDERP:  true,
+				derpConnected: true,
+			},
+			want: guard.ConnStatusConnected,
+		},
+		{
+			name: "force DERP, peer uses DERP, DERP down",
+			in: connStatusInputs{
+				forceDERP:     true,
+				peerUsesDERP:  true,
+				derpConnected: false,
+			},
+			want: guard.ConnStatusDisconnected,
+		},
+		{
+			name: "force DERP does not invent DERP support",
+			in: connStatusInputs{
+				forceDERP:         true,
+				peerUsesDERP:      false,
+				peerUsesRelay:     true,
+				relayConnected:    true,
+				remoteSupportsICE: false,
+				iceWorkerCreated:  false,
+			},
+			want: guard.ConnStatusConnected,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evalConnStatus(tc.in); got != tc.want {
+				t.Fatalf("evalConnStatus = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEvalConnStatus_ICEUnavailable(t *testing.T) {
 	tests := []struct {
 		name string

@@ -9,6 +9,9 @@ var (
 	// EnvKeyNBForceRelay Exported for Android java client to force relay connections
 	EnvKeyNBForceRelay = peer.EnvKeyNBForceRelay
 
+	// EnvKeyNBForceDERP Exported for Android java client to force DERP connections
+	EnvKeyNBForceDERP = peer.EnvKeyNBForceDERP
+
 	// EnvKeyNBLazyConn Exported for Android java client to configure lazy connection
 	EnvKeyNBLazyConn = lazyconn.EnvEnableLazyConn
 

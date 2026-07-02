@@ -1,6 +1,7 @@
 package grpc
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/netip"
 	"reflect"
@@ -13,7 +14,92 @@ import (
 	"github.com/netbirdio/netbird/management/internals/controllers/network_map"
 	"github.com/netbirdio/netbird/management/internals/controllers/network_map/controller/cache"
 	nbconfig "github.com/netbirdio/netbird/management/internals/server/config"
+	"github.com/netbirdio/netbird/shared/management/proto"
 )
+
+func TestToNetbirdConfigDERPNilAndDisabled(t *testing.T) {
+	t.Run("nil DERP config omits proto DERP config", func(t *testing.T) {
+		got := toNetbirdConfig(&nbconfig.Config{}, nil, nil, nil)
+		assert.NotNil(t, got)
+		assert.Nil(t, got.GetDerp())
+	})
+
+	t.Run("disabled DERP config is sent disabled", func(t *testing.T) {
+		got := toNetbirdConfig(&nbconfig.Config{DERP: &nbconfig.DERPConfig{}}, nil, nil, nil)
+		assert.NotNil(t, got.GetDerp())
+		assert.False(t, got.GetDerp().GetEnabled())
+		assert.Empty(t, got.GetDerp().GetRegions())
+	})
+}
+
+func TestToNetbirdConfigDERPMapping(t *testing.T) {
+	publicKey := []byte("derp-node-public-key")
+	cfg := &nbconfig.Config{
+		DERP: &nbconfig.DERPConfig{
+			Enabled:  true,
+			Priority: nbconfig.DERPPriorityBeforeNetBirdRelay,
+			Regions: []*nbconfig.DERPRegion{
+				{
+					ID:   1,
+					Name: "central",
+					Nodes: []*nbconfig.DERPNode{
+						{
+							ID:        "central-1",
+							URL:       "https://derp.example.com",
+							PublicKey: base64.StdEncoding.EncodeToString(publicKey),
+							Hostname:  "derp.example.com",
+							RegionID:  1,
+						},
+						{
+							ID:        "central-stun",
+							URL:       "stun://derp.example.com:3478",
+							PublicKey: base64.StdEncoding.EncodeToString([]byte("stun-key")),
+							Hostname:  "derp.example.com",
+							RegionID:  1,
+							STUNOnly:  true,
+						},
+					},
+				},
+			},
+			SelectionPolicy: &nbconfig.DERPSelectionPolicy{
+				AllowedRegionIDs:  []int32{1},
+				DeniedRegionIDs:   []int32{1},
+				PreferredRegionID: 1,
+				AutoSelect:        true,
+			},
+		},
+	}
+	assert.NoError(t, cfg.ValidateDERPConfig())
+
+	got := toNetbirdConfig(cfg, nil, nil, nil)
+	derp := got.GetDerp()
+	assert.NotNil(t, derp)
+	assert.True(t, derp.GetEnabled())
+	assert.Equal(t, proto.DERPPriority_DERP_PRIORITY_BEFORE_NETBIRD_RELAY, derp.GetPriority())
+	assert.Len(t, derp.GetRegions(), 1)
+	assert.Equal(t, int32(1), derp.GetRegions()[0].GetId())
+	assert.Equal(t, "central", derp.GetRegions()[0].GetName())
+	assert.Len(t, derp.GetRegions()[0].GetNodes(), 2)
+
+	node := derp.GetRegions()[0].GetNodes()[0]
+	assert.Equal(t, "central-1", node.GetId())
+	assert.Equal(t, "https://derp.example.com", node.GetUrl())
+	assert.Equal(t, publicKey, node.GetPublicKey())
+	assert.Equal(t, "derp.example.com", node.GetHostname())
+	assert.Equal(t, int32(1), node.GetRegionId())
+	assert.False(t, node.GetStunOnly())
+
+	stunNode := derp.GetRegions()[0].GetNodes()[1]
+	assert.True(t, stunNode.GetStunOnly())
+
+	assert.Equal(t, []int32{1}, derp.GetSelectionPolicy().GetAllowedRegionIds())
+	assert.Equal(t, []int32{1}, derp.GetSelectionPolicy().GetDeniedRegionIds())
+	assert.Equal(t, int32(1), derp.GetSelectionPolicy().GetPreferredRegionId())
+	assert.True(t, derp.GetSelectionPolicy().GetAutoSelect())
+
+	cfg.DERP.Regions[0].Nodes[0].DecodedPublicKey[0] = 0xFF
+	assert.Equal(t, publicKey, node.GetPublicKey(), "proto public key must be copied")
+}
 
 func TestToProtocolDNSConfigWithCache(t *testing.T) {
 	var cache cache.DNSConfigCache

@@ -18,8 +18,11 @@ const (
 // without constructing full Worker/Handshaker objects.
 type connStatusInputs struct {
 	forceRelay          bool // NB_FORCE_RELAY or JS/WASM
+	forceDERP           bool // NB_FORCE_DERP
 	peerUsesRelay       bool // remote peer advertises relay support AND local has relay
 	relayConnected      bool // statusRelay reports Connected (independent of whether peer uses relay)
+	peerUsesDERP        bool // remote peer advertises DERP support AND local has DERP
+	derpConnected       bool // statusDERP reports Connected
 	remoteSupportsICE   bool // remote peer sent ICE credentials
 	iceWorkerCreated    bool // local WorkerICE exists (false in force-relay mode)
 	iceStatusConnecting bool // statusICE is anything other than Disconnected

@@ -107,6 +107,15 @@ type RelayStateOutput struct {
 	Details   []RelayStateOutputDetail `json:"details" yaml:"details"`
 }
 
+type DERPStateOutput struct {
+	Enabled       bool   `json:"enabled" yaml:"enabled"`
+	HomeRegionID  int    `json:"homeRegionID" yaml:"homeRegionID"`
+	HomeNodeID    string `json:"homeNodeID" yaml:"homeNodeID"`
+	Ready         bool   `json:"ready" yaml:"ready"`
+	HomeConnected bool   `json:"homeConnected" yaml:"homeConnected"`
+	Force         bool   `json:"force" yaml:"force"`
+}
+
 type IceCandidateType struct {
 	Local  string `json:"local" yaml:"local"`
 	Remote string `json:"remote" yaml:"remote"`
@@ -140,6 +149,7 @@ type OutputOverview struct {
 	ManagementState         ManagementStateOutput      `json:"management" yaml:"management"`
 	SignalState             SignalStateOutput          `json:"signal" yaml:"signal"`
 	Relays                  RelayStateOutput           `json:"relays" yaml:"relays"`
+	DERP                    DERPStateOutput            `json:"derp" yaml:"derp"`
 	IP                      string                     `json:"netbirdIp" yaml:"netbirdIp"`
 	IPv6                    string                     `json:"netbirdIpv6,omitempty" yaml:"netbirdIpv6,omitempty"`
 	PubKey                  string                     `json:"publicKey" yaml:"publicKey"`
@@ -174,6 +184,7 @@ func ConvertToStatusOutputOverview(pbFullStatus *proto.FullStatus, opts ConvertO
 	}
 
 	relayOverview := mapRelays(pbFullStatus.GetRelays())
+	derpOverview := mapDERP(pbFullStatus.GetDerpState())
 	sshServerOverview := mapSSHServer(pbFullStatus.GetSshServerState())
 	peersOverview := mapPeers(pbFullStatus.GetPeers(), opts.StatusFilter, opts.PrefixNamesFilter, opts.PrefixNamesFilterMap, opts.IPsFilter, opts.ConnectionTypeFilter)
 
@@ -185,6 +196,7 @@ func ConvertToStatusOutputOverview(pbFullStatus *proto.FullStatus, opts ConvertO
 		ManagementState:         managementOverview,
 		SignalState:             signalOverview,
 		Relays:                  relayOverview,
+		DERP:                    derpOverview,
 		IP:                      pbFullStatus.GetLocalPeerState().GetIP(),
 		IPv6:                    pbFullStatus.GetLocalPeerState().GetIpv6(),
 		PubKey:                  pbFullStatus.GetLocalPeerState().GetPubKey(),
@@ -237,10 +249,31 @@ func mapRelays(relays []*proto.RelayState) RelayStateOutput {
 	}
 }
 
+func mapDERP(derp *proto.DERPState) DERPStateOutput {
+	if derp == nil {
+		return DERPStateOutput{}
+	}
+	return DERPStateOutput{
+		Enabled:       derp.GetEnabled(),
+		HomeRegionID:  int(derp.GetHomeRegionID()),
+		HomeNodeID:    derp.GetHomeNodeID(),
+		Ready:         derp.GetReady(),
+		HomeConnected: derp.GetHomeConnected(),
+		Force:         derp.GetForce(),
+	}
+}
+
 // relayErrorString flattens a newline-joined aggregated relay error onto a
 // single line for status output.
 func relayErrorString(s string) string {
 	return strings.ReplaceAll(s, "\n", "; ")
+}
+
+func valueOrDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func mapNSGroups(servers []*proto.NSGroupState) []NsServerGroupStateOutput {
@@ -305,9 +338,18 @@ func mapPeers(
 		isPeerConnected := pbPeerState.ConnStatus == peer.StatusConnected.String()
 
 		if isPeerConnected {
-			connType = "P2P"
-			if pbPeerState.Relayed {
+			switch pbPeerState.GetConnectionType() {
+			case "DERP":
+				connType = "DERP"
+			case "Relayed":
 				connType = "Relayed"
+			case "P2P":
+				connType = "P2P"
+			default:
+				connType = "P2P"
+				if pbPeerState.Relayed {
+					connType = "Relayed"
+				}
 			}
 		}
 
@@ -459,6 +501,20 @@ func (o *OutputOverview) GeneralSummary(showURL bool, showRelays bool, showNameS
 		relaysString = fmt.Sprintf("%d/%d Available", o.Relays.Available, o.Relays.Total)
 	}
 
+	derpString := "Disabled"
+	if o.DERP.Enabled {
+		derpString = fmt.Sprintf(
+			"Enabled, home region: %d, home node: %s, ready: %t, home connected: %t, force: %t",
+			o.DERP.HomeRegionID,
+			valueOrDash(o.DERP.HomeNodeID),
+			o.DERP.Ready,
+			o.DERP.HomeConnected,
+			o.DERP.Force,
+		)
+	} else if o.DERP.Force {
+		derpString = "Disabled, force: true"
+	}
+
 	networks := "-"
 	if len(o.Networks) > 0 {
 		sort.Strings(o.Networks)
@@ -582,6 +638,7 @@ func (o *OutputOverview) GeneralSummary(showURL bool, showRelays bool, showNameS
 			"Management: %s\n"+
 			"Signal: %s\n"+
 			"Relays: %s\n"+
+			"DERP: %s\n"+
 			"Nameservers: %s\n"+
 			"FQDN: %s\n"+
 			"NetBird IP: %s\n"+
@@ -601,6 +658,7 @@ func (o *OutputOverview) GeneralSummary(showURL bool, showRelays bool, showNameS
 		managementConnString,
 		signalConnString,
 		relaysString,
+		derpString,
 		dnsServersString,
 		domain.Domain(o.FQDN).SafeString(),
 		interfaceIP,
@@ -665,6 +723,14 @@ func ToProtoFullStatus(fullStatus peer.FullStatus) *proto.FullStatus {
 	pbFullStatus.LocalPeerState.Networks = maps.Keys(fullStatus.LocalPeerState.Routes)
 	pbFullStatus.NumberOfForwardingRules = int32(fullStatus.NumOfForwardingRules)
 	pbFullStatus.LazyConnectionEnabled = fullStatus.LazyConnectionEnabled
+	pbFullStatus.DerpState = &proto.DERPState{
+		Enabled:       fullStatus.DERPState.Enabled,
+		HomeRegionID:  int32(fullStatus.DERPState.HomeRegionID),
+		HomeNodeID:    fullStatus.DERPState.HomeNodeID,
+		Ready:         fullStatus.DERPState.Ready,
+		HomeConnected: fullStatus.DERPState.HomeConnected,
+		Force:         fullStatus.DERPState.Force,
+	}
 
 	for _, peerState := range fullStatus.Peers {
 		pbPeerState := &proto.PeerState{
@@ -674,6 +740,7 @@ func ToProtoFullStatus(fullStatus peer.FullStatus) *proto.FullStatus {
 			ConnStatus:                 peerState.ConnStatus.String(),
 			ConnStatusUpdate:           timestamppb.New(peerState.ConnStatusUpdate),
 			Relayed:                    peerState.Relayed,
+			ConnectionType:             peerState.ConnectionType,
 			LocalIceCandidateType:      peerState.LocalIceCandidateType,
 			RemoteIceCandidateType:     peerState.RemoteIceCandidateType,
 			LocalIceCandidateEndpoint:  peerState.LocalIceCandidateEndpoint,

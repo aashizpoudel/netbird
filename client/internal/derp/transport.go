@@ -9,12 +9,6 @@ import (
 )
 
 // Transport is the injectable DERP home + peer-stream transport.
-//
-// The default ClientManager uses a no-op transport; tests inject MemTransport.
-// The real wire-protocol DERP client/server (Tailscale vendoring vs custom) is
-// an open decision (Open Decision 6) and is intentionally out of scope: this
-// interface lets a real transport be plugged in later without changing
-// ClientManager's public API.
 type Transport interface {
 	// ConnectHome establishes/refreshes the long-lived home connection for the
 	// selected home node. Returns nil if already connected to the same node.
@@ -23,9 +17,9 @@ type Transport interface {
 	ConnectHome(ctx context.Context, home Node) error
 	// CloseHome closes the current home connection if any.
 	CloseHome() error
-	// OpenPeerStream opens a peer stream to remoteKey/remote home, wrapped as a
-	// net.Conn. The returned conn MUST be closable (FR-27).
-	OpenPeerStream(ctx context.Context, remoteKey string, remote PeerState) (net.Conn, error)
+	// OpenPeerStream opens a packet-like peer connection to remoteKey through
+	// remoteNode. The returned conn MUST be closable (FR-27).
+	OpenPeerStream(ctx context.Context, remoteKey string, remote PeerState, remoteNode Node) (net.Conn, error)
 	// HomeConnected reports whether the home connection is currently up.
 	HomeConnected() bool
 }
@@ -37,7 +31,7 @@ type noopTransport struct{}
 
 func (noopTransport) ConnectHome(context.Context, Node) error { return nil }
 func (noopTransport) CloseHome() error                        { return nil }
-func (noopTransport) OpenPeerStream(context.Context, string, PeerState) (net.Conn, error) {
+func (noopTransport) OpenPeerStream(context.Context, string, PeerState, Node) (net.Conn, error) {
 	return nil, fmt.Errorf("%w: %w", ErrNotConnected, ErrNotImplemented)
 }
 func (noopTransport) HomeConnected() bool { return false }
@@ -131,7 +125,7 @@ func (m *MemTransport) HomeConnected() bool {
 // OpenPeerStream invokes the registered peer handler and returns its conn.
 // It requires the home connection to be up; if not, it returns ErrNotConnected.
 // If no handler is registered, it returns ErrNotImplemented.
-func (m *MemTransport) OpenPeerStream(ctx context.Context, remoteKey string, remote PeerState) (net.Conn, error) {
+func (m *MemTransport) OpenPeerStream(ctx context.Context, remoteKey string, remote PeerState, remoteNode Node) (net.Conn, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -148,6 +142,9 @@ func (m *MemTransport) OpenPeerStream(ctx context.Context, remoteKey string, rem
 	}
 	if handler == nil {
 		return nil, fmt.Errorf("%w: no peer handler registered", ErrNotImplemented)
+	}
+	if remoteNode.ID == "" && remote.HomeNodeID != "" {
+		remoteNode.ID = remote.HomeNodeID
 	}
 	return handler(remoteKey, remote)
 }

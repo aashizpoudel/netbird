@@ -34,3 +34,8 @@ vendor/
 /netbird
 client/netbird-electron/
 management/server/types/testdata/
+
+# Local Docker-based build/dependency caches
+.gocache-docker/
+.gocache-docker-amd64/
+.gomodcache-docker/

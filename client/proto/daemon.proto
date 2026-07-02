@@ -346,6 +346,7 @@ message PeerState {
   string relayAddress = 18;
   bytes sshHostKey = 19;
   string ipv6 = 20;
+  string connectionType = 21;
 }
 
 // LocalPeerState contains the latest state of the local peer
@@ -385,6 +386,16 @@ message RelayState {
   string transport = 4;
 }
 
+// DERPState contains the latest local DERP manager state.
+message DERPState {
+  bool enabled = 1;
+  int32 homeRegionID = 2;
+  string homeNodeID = 3;
+  bool ready = 4;
+  bool homeConnected = 5;
+  bool force = 6;
+}
+
 message NSGroupState {
   repeated string servers = 1;
   repeated string domains = 2;
@@ -421,6 +432,7 @@ message FullStatus {
 
   bool lazyConnectionEnabled = 9;
   SSHServerState sshServerState = 10;
+  DERPState derpState = 11;
 }
 
 // Networks

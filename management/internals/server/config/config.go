@@ -38,6 +38,7 @@ type Config struct {
 	Stuns      []*Host
 	TURNConfig *TURNConfig
 	Relay      *Relay
+	DERP       *DERPConfig
 	Signal     *Host
 
 	Datadir                string
@@ -91,6 +92,50 @@ type Relay struct {
 	Addresses      []string
 	CredentialsTTL util.Duration
 	Secret         string
+}
+
+// DERPPriority controls the ordering between NetBird relay and DERP.
+type DERPPriority string
+
+const (
+	DERPPriorityAfterNetBirdRelay  DERPPriority = "AFTER_NETBIRD_RELAY"
+	DERPPriorityBeforeNetBirdRelay DERPPriority = "BEFORE_NETBIRD_RELAY"
+)
+
+// DERPConfig contains the static DERP map distributed by management.
+// YAML tags allow the combined server's YAML config to carry DERP settings;
+// the standalone management server loads JSON (encoding/json ignores yaml tags).
+type DERPConfig struct {
+	Enabled                bool                `yaml:"enabled"`
+	Regions                []*DERPRegion       `yaml:"regions"`
+	SelectionPolicy        *DERPSelectionPolicy `yaml:"selectionPolicy"`
+	Priority               DERPPriority        `yaml:"priority"`
+	UseTailscaleDefaultMap bool                `yaml:"useTailscaleDefaultMap"`
+	MapURL                 string              `yaml:"mapURL"`
+}
+
+type DERPRegion struct {
+	ID    int32        `yaml:"id"`
+	Name  string       `yaml:"name"`
+	Nodes []*DERPNode  `yaml:"nodes"`
+}
+
+type DERPNode struct {
+	ID        string `yaml:"id"`
+	URL       string `yaml:"url"`
+	PublicKey string `yaml:"publicKey"`
+	Hostname  string `yaml:"hostname"`
+	RegionID  int32  `yaml:"regionId"`
+	STUNOnly  bool   `yaml:"stunOnly"`
+
+	DecodedPublicKey []byte `json:"-"`
+}
+
+type DERPSelectionPolicy struct {
+	AllowedRegionIDs  []int32 `yaml:"allowedRegionIds"`
+	DeniedRegionIDs   []int32 `yaml:"deniedRegionIds"`
+	PreferredRegionID int32   `yaml:"preferredRegionId"`
+	AutoSelect        bool    `yaml:"autoSelect"`
 }
 
 // HttpServerConfig is a config of the HTTP Management service server

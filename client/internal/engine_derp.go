@@ -132,12 +132,32 @@ func intsFromInt32(in []int32) []int {
 // keeps working with management servers that never send DERP fields.
 func (e *Engine) handleDERPUpdate(update *mgmProto.DERPConfig) error {
 	if e.derpManager == nil {
+		e.publishDERPState()
 		return nil
 	}
 	if err := e.derpManager.UpdateMap(convertDERPConfig(update)); err != nil {
 		return fmt.Errorf("update derp map: %w", err)
 	}
+	e.publishDERPState()
 	return nil
+}
+
+func (e *Engine) publishDERPState() {
+	if e.statusRecorder == nil {
+		return
+	}
+
+	state := peer.DERPState{Force: peer.IsForceDERP()}
+	if e.derpManager != nil {
+		if localState, ok := (&derpManagerAdapter{manager: e.derpManager}).LocalState(); ok {
+			state.Enabled = localState.Enabled
+			state.HomeRegionID = localState.HomeRegionID
+			state.HomeNodeID = localState.HomeNodeID
+		}
+		state.Ready = e.derpManager.Ready()
+		state.HomeConnected = e.derpManager.HomeConnected()
+	}
+	e.statusRecorder.UpdateDERPState(state)
 }
 
 // convertSignalDERPPeerState maps the signal protobuf DERP peer state into the

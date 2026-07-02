@@ -8,6 +8,7 @@ import (
 
 const (
 	EnvKeyNBForceRelay       = "NB_FORCE_RELAY"
+	EnvKeyNBForceDERP        = "NB_FORCE_DERP"
 	EnvKeyNBHomeRelayServers = "NB_HOME_RELAY_SERVERS"
 )
 
@@ -16,6 +17,10 @@ func IsForceRelayed() bool {
 		return true
 	}
 	return strings.EqualFold(os.Getenv(EnvKeyNBForceRelay), "true")
+}
+
+func IsForceDERP() bool {
+	return strings.EqualFold(os.Getenv(EnvKeyNBForceDERP), "true")
 }
 
 // OverrideRelayURLs returns the relay server URL list set in

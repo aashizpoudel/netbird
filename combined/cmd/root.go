@@ -259,6 +259,15 @@ func (s *serverInstances) createManagementServer(ctx context.Context, cfg *Combi
 		return fmt.Errorf("failed to create management config: %w", err)
 	}
 
+	if err := mgmtConfig.ResolveDERPMap(ctx); err != nil {
+		cleanupSTUNListeners(s.stunListeners)
+		return fmt.Errorf("failed to resolve DERP map: %w", err)
+	}
+	if err := mgmtConfig.ValidateDERPConfig(); err != nil {
+		cleanupSTUNListeners(s.stunListeners)
+		return fmt.Errorf("invalid DERP config: %w", err)
+	}
+
 	_, portStr, portErr := net.SplitHostPort(cfg.Server.ListenAddress)
 	if portErr != nil {
 		portStr = "443"

@@ -295,6 +295,12 @@ func NewEngine(
 	// cycle (see Client.run), so the run context is created once here rather
 	// than in Start.
 	ctx, cancel := context.WithCancel(clientCtx)
+	derpManager := derp.NewManager()
+	if derpTransport, err := derp.NewTailscaleTransport(config.WgPrivateKey); err != nil {
+		log.Warnf("failed to initialize DERP transport; DERP will remain disabled: %v", err)
+	} else {
+		derpManager = derp.NewManagerWithTransport(derpTransport)
+	}
 	engine := &Engine{
 		clientCtx:          clientCtx,
 		clientCancel:       clientCancel,
@@ -304,7 +310,7 @@ func NewEngine(
 		signaler:           peer.NewSignaler(services.SignalClient, config.WgPrivateKey),
 		mgmClient:          services.MgmClient,
 		relayManager:       services.RelayManager,
-		derpManager:        derp.NewManager(),
+		derpManager:        derpManager,
 		peerStore:          peerstore.NewConnStore(),
 		syncMsgMux:         &sync.Mutex{},
 		config:             config,
@@ -624,6 +630,12 @@ func (e *Engine) Start(netbirdConfig *mgmProto.NetbirdConfig, mgmtURL *url.URL) 
 
 	e.srWatcher = guard.NewSRWatcher(e.signal, e.relayManager, e.mobileDep.IFaceDiscover, iceCfg)
 	e.srWatcher.Start(peer.IsForceRelayed())
+
+	if e.derpManager != nil {
+		if err := e.derpManager.Start(e.ctx); err != nil {
+			return fmt.Errorf("start derp manager: %w", err)
+		}
+	}
 
 	if err = e.receiveSignalEvents(); err != nil {
 		return err

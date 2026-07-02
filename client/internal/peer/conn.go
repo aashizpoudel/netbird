@@ -239,7 +239,8 @@ func (conn *Conn) open(engineCtx context.Context, firstPacket []byte) error {
 	conn.workerDERP = NewWorkerDERP(conn.ctx, conn.Log, conn.config, conn, conn.derpManager)
 
 	forceRelay := IsForceRelayed()
-	if !forceRelay {
+	forceDERP := IsForceDERP()
+	if !forceRelay && !forceDERP {
 		relayIsSupportedLocally := conn.workerRelay.RelayIsSupportedLocally()
 		workerICE, err := NewWorkerICE(conn.ctx, conn.Log, conn.config, conn, conn.signaler, conn.iFaceDiscover, conn.statusRecorder, relayIsSupportedLocally)
 		if err != nil {
@@ -252,7 +253,7 @@ func (conn *Conn) open(engineCtx context.Context, firstPacket []byte) error {
 
 	conn.handshaker.AddRelayListener(conn.workerRelay.OnNewOffer)
 	conn.handshaker.AddDERPListener(conn.workerDERP.OnNewOffer)
-	if !forceRelay {
+	if !forceRelay && !forceDERP {
 		conn.handshaker.AddICEListener(conn.workerICE.OnNewOffer)
 	}
 
@@ -570,14 +571,11 @@ func (conn *Conn) onICEStateDisconnected(sessionChanged bool) {
 		conn.metricsStages.Disconnected()
 	}
 
-	if conn.currentConnPriority == conntype.DERP {
-		return
-	}
-
 	peerState := State{
 		PubKey:           conn.config.Key,
 		ConnStatus:       conn.evalStatus(),
 		Relayed:          conn.isRelayed(),
+		ConnectionType:   conn.connectionType(),
 		ConnStatusUpdate: time.Now(),
 	}
 	if err := conn.statusRecorder.UpdatePeerICEStateToDisconnected(peerState); err != nil {
@@ -609,6 +607,14 @@ func (conn *Conn) onRelayConnectionIsReady(rci RelayConnInfo) {
 	conn.dumpState.NewLocalProxy()
 
 	conn.Log.Infof("created new wgProxy for relay connection: %s", wgProxy.EndpointAddr().String())
+
+	if IsForceDERP() && conn.workerDERP != nil && conn.workerDERP.IsDERPConnectionSupportedWithPeer() {
+		conn.Log.Debugf("do not switch to relay because DERP is forced and supported with peer")
+		conn.setRelayedProxy(wgProxy)
+		conn.statusRelay.SetConnected()
+		conn.updateRelayStatus(rci.relayedConn.RemoteAddr().String(), rci.rosenpassPubKey, time.Now())
+		return
+	}
 
 	if conn.isICEActive() {
 		conn.Log.Debugf("do not switch to relay because current priority is: %s", conn.currentConnPriority.String())
@@ -681,7 +687,7 @@ func (conn *Conn) onDERPConnectionIsReady(dci DERPConnInfo) {
 
 	conn.Log.Infof("created new wgProxy for DERP connection: %s", wgProxy.EndpointAddr().String())
 
-	if conn.currentConnPriority > conntype.DERP {
+	if conn.currentConnPriority > conntype.DERP && !IsForceDERP() {
 		conn.Log.Debugf("do not switch to DERP because current priority is: %s", conn.currentConnPriority.String())
 		conn.setDERPProxy(wgProxy)
 		conn.statusDERP.SetConnected()
@@ -774,6 +780,16 @@ func (conn *Conn) handleRelayDisconnectedLocked() {
 	}
 
 	if conn.currentConnPriority == conntype.DERP {
+		peerState := State{
+			PubKey:           conn.config.Key,
+			ConnStatus:       conn.evalStatus(),
+			Relayed:          conn.isRelayed(),
+			ConnectionType:   conn.connectionType(),
+			ConnStatusUpdate: time.Now(),
+		}
+		if err := conn.statusRecorder.UpdatePeerICEStateToDisconnected(peerState); err != nil {
+			conn.Log.Warnf("unable to save peer's state after Relay to DERP fallback, got error: %v", err)
+		}
 		return
 	}
 
@@ -781,6 +797,7 @@ func (conn *Conn) handleRelayDisconnectedLocked() {
 		PubKey:           conn.config.Key,
 		ConnStatus:       conn.evalStatus(),
 		Relayed:          conn.isRelayed(),
+		ConnectionType:   conn.connectionType(),
 		ConnStatusUpdate: time.Now(),
 	}
 	if err := conn.statusRecorder.UpdatePeerRelayedStateToDisconnected(peerState); err != nil {
@@ -830,6 +847,7 @@ func (conn *Conn) handleDERPDisconnectedLocked() {
 		PubKey:           conn.config.Key,
 		ConnStatus:       conn.evalStatus(),
 		Relayed:          conn.isRelayed(),
+		ConnectionType:   conn.connectionType(),
 		ConnStatusUpdate: time.Now(),
 	}
 	if err := conn.statusRecorder.UpdatePeerRelayedStateToDisconnected(peerState); err != nil {
@@ -875,6 +893,7 @@ func (conn *Conn) updateRelayStatus(relayServerAddr string, rosenpassPubKey []by
 		ConnStatusUpdate:   updateTime,
 		ConnStatus:         conn.evalStatus(),
 		Relayed:            conn.isRelayed(),
+		ConnectionType:     conn.connectionType(),
 		RelayServerAddress: relayServerAddr,
 		RosenpassEnabled:   isRosenpassEnabled(rosenpassPubKey),
 	}
@@ -891,6 +910,7 @@ func (conn *Conn) updateDERPStatus(derpRemoteAddr string, rosenpassPubKey []byte
 		ConnStatusUpdate:   updateTime,
 		ConnStatus:         conn.evalStatus(),
 		Relayed:            conn.isRelayed(),
+		ConnectionType:     conn.connectionType(),
 		RelayServerAddress: derpRemoteAddr,
 		RosenpassEnabled:   isRosenpassEnabled(rosenpassPubKey),
 	}
@@ -907,6 +927,7 @@ func (conn *Conn) updateIceState(iceConnInfo ICEConnInfo, updateTime time.Time) 
 		ConnStatusUpdate:           updateTime,
 		ConnStatus:                 conn.evalStatus(),
 		Relayed:                    iceConnInfo.Relayed,
+		ConnectionType:             conn.connectionType(),
 		LocalIceCandidateType:      iceConnInfo.LocalIceCandidateType,
 		RemoteIceCandidateType:     iceConnInfo.RemoteIceCandidateType,
 		LocalIceCandidateEndpoint:  iceConnInfo.LocalIceCandidateEndpoint,
@@ -964,6 +985,19 @@ func (conn *Conn) isRelayed() bool {
 	}
 }
 
+func (conn *Conn) connectionType() string {
+	switch conn.currentConnPriority {
+	case conntype.DERP:
+		return "DERP"
+	case conntype.Relay, conntype.ICETurn:
+		return "Relayed"
+	case conntype.ICEP2P:
+		return "P2P"
+	default:
+		return ""
+	}
+}
+
 func (conn *Conn) evalStatus() ConnStatus {
 	if conn.statusDERP.Get() == worker.StatusConnected || conn.statusRelay.Get() == worker.StatusConnected || conn.statusICE.Get() == worker.StatusConnected {
 		return StatusConnected
@@ -996,13 +1030,17 @@ func (conn *Conn) isConnectedOnAllWay() (status guard.ConnStatus) {
 	if conn.workerDERP != nil {
 		peerUsesDERP = conn.workerDERP.IsDERPConnectionSupportedWithPeer()
 	}
+	derpConnected := conn.statusDERP.Get() == worker.StatusConnected
 	peerUsesRelayFallback := conn.workerRelay.IsRelayConnectionSupportedWithPeer() || peerUsesDERP
-	relayFallbackConnected := conn.statusRelay.Get() == worker.StatusConnected || conn.statusDERP.Get() == worker.StatusConnected
+	relayFallbackConnected := conn.statusRelay.Get() == worker.StatusConnected || derpConnected
 
 	return evalConnStatus(connStatusInputs{
 		forceRelay:          IsForceRelayed(),
+		forceDERP:           IsForceDERP(),
 		peerUsesRelay:       peerUsesRelayFallback,
 		relayConnected:      relayFallbackConnected,
+		peerUsesDERP:        peerUsesDERP,
+		derpConnected:       derpConnected,
 		remoteSupportsICE:   conn.handshaker.RemoteICESupported(),
 		iceWorkerCreated:    iceWorkerCreated,
 		iceStatusConnecting: conn.statusICE.Get() != worker.StatusDisconnected,
@@ -1192,6 +1230,10 @@ func isRosenpassEnabled(remoteRosenpassPubKey []byte) bool {
 func evalConnStatus(in connStatusInputs) guard.ConnStatus {
 	// "Relay up and needed" — the peer uses relay and the transport is connected.
 	relayUsedAndUp := in.peerUsesRelay && in.relayConnected
+
+	if in.forceDERP && in.peerUsesDERP {
+		return boolToConnStatus(in.derpConnected)
+	}
 
 	// Force-relay mode: ICE never runs. Relay is the only transport and must be up.
 	if in.forceRelay {
